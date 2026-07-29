@@ -1,0 +1,14 @@
+{
+  "generator.continentgen.continent": "Continents",
+  "continentgen.customize.title": "Customize Continent World",
+  "continentgen.customize.map_size": "World size",
+  "continentgen.customize.map_size_label": "World size (blocks per side):",
+  "continentgen.customize.map_size_hint": "Default: %1$s  |  Min: %2$s  |  Max: %3$s",
+  "continentgen.customize.description": "Enter the world size in blocks. The 3000×3000 pixel PNG map is scaled to fit this size. Bigger world = more blocks per pixel (less detail).",
+  "continentgen.customize.done": "Done",
+  "continentgen.customize.cancel": "Cancel",
+  "continentgen.customize.error.empty": "Please enter a world size.",
+  "continentgen.customize.error.too_small": "Value too small. Minimum: %s blocks.",
+  "continentgen.customize.error.too_big": "Value too large. Maximum: %s blocks.",
+  "continentgen.customize.error.invalid": "Invalid number."
+}
