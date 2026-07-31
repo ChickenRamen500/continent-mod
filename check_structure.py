@@ -202,6 +202,29 @@ if os.path.exists(chunkgen):
     else:
         print("\n  ✅ SimplexNoise отсутствует в ContinentChunkGenerator (OK)")
 
+    # ─── Terrain carving check (v6) ─────────────────────────────
+    # Реки НЕ должны использовать фиксированный seaLevel для waterSurfaceY.
+    # Правильно: terrain carving (waterSurfaceY = terrainHeight или max(terrainHeight, seaLevel)).
+    # Проверяем: если в коде есть "waterSurfaceY = seaLevel" без Math.max — это ошибка.
+    import re
+    # Ищем прямое присваивание waterSurfaceY = seaLevel (без terrain carving)
+    direct_sea = re.findall(r'waterSurfaceY\s*=\s*seaLevel\s*;', cg_content)
+    carving_ok = "RIVER_CARVE_DEPTH" in cg_content and "waterAbove" in cg_content
+    if direct_sea and not carving_ok:
+        print("  ❌ ЗАПРЕЩЁН: вода рек/озёр на фиксированном SEA_LEVEL!")
+        print("     Найдено: waterSurfaceY = seaLevel (без terrain carving)")
+        errors += 1
+    elif carving_ok:
+        print("  ✅ Terrain carving реализован (RIVER_CARVE_DEPTH + waterAbove)")
+    else:
+        print("  ⚠️  Terrain carving не обнаружен в ContinentChunkGenerator")
+
+    # Проверяем что версия в комментарии — v6
+    if "v6" in cg_content:
+        print("  ✅ ContinentChunkGenerator: версия v6 (terrain carving)")
+    else:
+        print("  ⚠️  ContinentChunkGenerator: версия НЕ v6")
+
 # ─── ContinentCustomizeScreen world size check ─────────────────────
 customize = "src/main/java/com/continentgen/client/ContinentCustomizeScreen.java"
 if os.path.exists(customize):

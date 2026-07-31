@@ -11,13 +11,13 @@ import java.util.logging.Logger;
 /**
  * Хранит 7 массивов PNG карт для генерации мира.
  *
- * v5 (28.07.2026):
+ * v6 (31.07.2026):
  *   - Высота: билинейная интерполяция (гладкая поверхность без ступеней).
  *   - Океан: маска через getOceanNess() [0..1] — плавный берег.
  *   - Реки/Озёра: getRiverNess()/getLakeNess() [0..1] — билинейная
  *     интерполяция бинарной маски. НЕ использует круги.
- *   - Уровень воды рек/озёр = SEA_LEVEL (не terrainHeight).
- *     Решает проблему "горы покрытые 1 блоком воды".
+ *   - Примечание: вода рек/озёр следует за рельефом (terrain carving),
+ *     реализуется в ContinentChunkGenerator (не здесь).
  */
 public class MapData {
     private static final Logger LOGGER = Logger.getLogger("ContinentGen");

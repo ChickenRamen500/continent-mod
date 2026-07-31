@@ -31,13 +31,17 @@ import java.util.logging.Logger;
 /**
  * Кастомный ChunkGenerator для генерации мира из PNG карт.
  *
+ * v6 (31.07.2026) — TERRAIN CARVING:
+ *   - Реки и озёра: terrain carving вместо фиксированного SEA_LEVEL.
+ *     Вода следует за рельефом: riverBed = terrainHeight - CARVE_DEPTH * ness,
+ *     waterSurface = terrainHeight (не seaLevel!).
+ *     Решает проблему «перепад 128 блоков на горных берегах».
+ *   - Берег: плавный склон от terrainHeight к carvedHeight,
+ *     вода заполняет склон естественным образом.
+ *   - Океан: без изменений (дно = terrainHeight, вода = seaLevel).
+ *
  * v5 (28.07.2026):
- *   - Реки и озёра: вода на уровне SEA_LEVEL (не terrainHeight).
- *     Решает проблему "горы покрытые водой".
- *   - Реки/озёра: билинейная интерполяция маски вместо кругов.
- *     Решает проблему кругов-артефактов.
- *   - Параболическое русло реки (глубже в центре, мельче по краям).
- *   - Плавные берега через riverNess/lakeNess.
+ *   - Билинейная интерполяция маски рек/озёр вместо кругов.
  *   - Океан: плавное смешивание через oceanNess.
  */
 public class ContinentChunkGenerator extends ChunkGenerator {
@@ -51,13 +55,10 @@ public class ContinentChunkGenerator extends ChunkGenerator {
     );
 
     private static final int SURFACE_BLOCK_COUNT = 4;
-    /** Глубина русла реки в центре (SEA_LEVEL - RIVER_DEPTH = дно). */
-    private static final int RIVER_DEPTH = 4;
-    /** Глубина дна озера. */
-    private static final int LAKE_DEPTH = 3;
-    /** Ширина зоны плавного перехода берега (0..1 в riverNess). */
-    private static final double RIVER_BANK_RANGE = 0.3;
-    private static final double LAKE_BANK_RANGE = 0.3;
+    /** Максимальная глубина русла реки (блоки ниже terrainHeight). */
+    private static final int RIVER_CARVE_DEPTH = 8;
+    /** Максимальная глубина дна озера (блоки ниже terrainHeight). */
+    private static final int LAKE_CARVE_DEPTH = 5;
 
     private final long seed;
     private final int worldSize;
@@ -160,7 +161,7 @@ public class ContinentChunkGenerator extends ChunkGenerator {
 
     @Override
     public void getDebugHudText(List<String> info, NoiseConfig noiseConfig, BlockPos pos) {
-        info.add("Continent Generator (v5 — bilinear rivers)");
+        info.add("Continent Generator (v6 — terrain carving)");
         info.add(mapData.isLoaded() ? "Карты: Загружены" : "Карты: НЕ НАЙДЕНЫ");
         if (mapData.isLoaded()) {
             int x = pos.getX(), z = pos.getZ();
@@ -181,15 +182,24 @@ public class ContinentChunkGenerator extends ChunkGenerator {
     /**
      * Генерация одной колонки.
      *
-     * Логика (v5):
+     * Логика (v6 — terrain carving):
      *  1. terrainHeight = getHeight() — билинейная, гладкая.
      *  2. Определить тип:
-     *     - Океан: пол = terrainHeight, вода = SEA_LEVEL.
-     *     - Река (riverNess > 0.5): русло = SEA_LEVEL - RIVER_DEPTH,
-     *       поверхность воды = SEA_LEVEL. Параболическое русло.
+     *     - Океан: пол = terrainHeight, вода = SEA_LEVEL (без изменений).
+     *     - Река (riverNess > 0.5): TERRAIN CARVING.
+     *       riverBed = terrainHeight - RIVER_CARVE_DEPTH * centerFactor.
+     *       waterSurface = terrainHeight (вода следует за рельефом, НЕ seaLevel!).
+     *       Вода заполняет русло от riverBed до terrainHeight.
      *     - Озеро (lakeNess > 0.5): аналогично реке, но мельче.
-     *     - Берег реки/озёра (0.2 < ness < 0.5): плавный переход.
+     *     - Берег реки/озёра (0.2 < ness < 0.5): плавный склон,
+     *       terrainHeight → carvedHeight. Вода заполняет склон.
      *     - Суша: поверхность = terrainHeight.
+     *
+     *  Пример: гора на Y=150, река в центре (riverNess=1.0):
+     *    riverBed = 150 - 8 = 142
+     *    waterSurface = 150
+     *    Вода заполняет Y=143..150 (8 блоков глубины).
+     *    Берег: плавный склон от 150 до 142.
      */
     private void generateColumn(Chunk chunk, int worldX, int worldZ, int localX, int localZ) {
         int seaLevel = MapData.SEA_LEVEL;
@@ -213,34 +223,36 @@ public class ContinentChunkGenerator extends ChunkGenerator {
             waterSurfaceY = seaLevel;
             hasWater = true;
         } else if (riverNess >= 0.5) {
-            // ─── РУСЛО РЕКИ ──────────────────────────────────────
-            // Вода на уровне SEA_LEVEL, дно ниже.
-            waterSurfaceY = seaLevel;
-            // Параболическое русло: глубже в центре, мельче по краям
+            // ─── РУСЛО РЕКИ: TERRAIN CARVING ────────────────────
+            // Русло = понижение рельефа. Вода следует за высотой.
+            // НЕ используется фиксированный SEA_LEVEL!
             double centerFactor = (riverNess - 0.5) / 0.5; // 0 на краю, 1 в центре
-            int depth = (int) (RIVER_DEPTH * centerFactor);
-            surfaceY = Math.max(minBuildY + 1, seaLevel - depth);
+            int carveDepth = (int)(RIVER_CARVE_DEPTH * centerFactor);
+            int carvedHeight = Math.max(minBuildY + 1, terrainHeight - carveDepth);
+            surfaceY = carvedHeight;                              // дно русла
+            waterSurfaceY = Math.max(terrainHeight, seaLevel);     // вода = уровень рельефа
             hasWater = true;
         } else if (lakeNess >= 0.5) {
-            // ─── РУСЛО ОЗЕРА ─────────────────────────────────────
-            waterSurfaceY = seaLevel;
+            // ─── РУСЛО ОЗЕРА: TERRAIN CARVING ──────────────────
             double centerFactor = (lakeNess - 0.5) / 0.5;
-            int depth = (int) (LAKE_DEPTH * centerFactor);
-            surfaceY = Math.max(minBuildY + 1, seaLevel - depth);
+            int carveDepth = (int)(LAKE_CARVE_DEPTH * centerFactor);
+            int carvedHeight = Math.max(minBuildY + 1, terrainHeight - carveDepth);
+            surfaceY = carvedHeight;
+            waterSurfaceY = Math.max(terrainHeight, seaLevel);
             hasWater = true;
         } else if (riverNess >= 0.2 || lakeNess >= 0.2) {
-            // ─── БЕРЕГ РЕКИ/ОЗЕРА: плавный переход ───────────────
+            // ─── БЕРЕГ РЕКИ/ОЗЕРА: плавный склон ──────────────
+            // Склон от terrainHeight к carvedHeight.
+            // Вода заполняет склон (естественный переход).
             double bankNess = Math.max(riverNess, lakeNess);
+            boolean isLake = lakeNess > riverNess;
+            int maxCarve = isLake ? LAKE_CARVE_DEPTH : RIVER_CARVE_DEPTH;
             // bankNess в диапазоне [0.2, 0.5) → blendFactor [0.0, 1.0)
             double blendFactor = (bankNess - 0.2) / 0.3;
-            // Смешиваем: terrainHeight → seaLevel по мере приближения к руслу
-            surfaceY = (int) (terrainHeight * (1.0 - blendFactor) + seaLevel * blendFactor);
-            if (surfaceY < seaLevel) {
-                waterSurfaceY = seaLevel;
-                hasWater = true;
-            } else {
-                waterSurfaceY = surfaceY;
-            }
+            int carvedHeight = Math.max(minBuildY + 1, terrainHeight - maxCarve);
+            surfaceY = (int)(terrainHeight * (1.0 - blendFactor) + carvedHeight * blendFactor);
+            waterSurfaceY = Math.max(terrainHeight, seaLevel);
+            hasWater = true;
         } else {
             // ─── СУША: обычный рельеф ─────────────────────────────
             surfaceY = terrainHeight;
@@ -253,6 +265,8 @@ public class ContinentChunkGenerator extends ChunkGenerator {
 
         // Заполнение колонки
         int topY = Math.max(surfaceY, waterSurfaceY);
+        // Есть ли вода НАД поверхностью? (для выбора блока поверхности)
+        boolean waterAbove = waterSurfaceY > surfaceY;
         for (int y = minBuildY; y <= topY; y++) {
             BlockPos pos = new BlockPos(localX, y, localZ);
             BlockState blockState;
@@ -261,13 +275,13 @@ public class ContinentChunkGenerator extends ChunkGenerator {
                 // Вода выше поверхности/дна
                 blockState = Blocks.WATER.getDefaultState();
             } else if (y == surfaceY) {
-                if (hasWater) {
+                if (waterAbove) {
                     blockState = getUnderwaterSurfaceBlock(worldX, worldZ, surfaceY);
                 } else {
                     blockState = getSurfaceBlock(worldX, worldZ, surfaceY);
                 }
             } else if (y > surfaceY - SURFACE_BLOCK_COUNT && y > minBuildY) {
-                blockState = hasWater ? Blocks.GRAVEL.getDefaultState() : Blocks.DIRT.getDefaultState();
+                blockState = waterAbove ? Blocks.GRAVEL.getDefaultState() : Blocks.DIRT.getDefaultState();
             } else {
                 blockState = Blocks.STONE.getDefaultState();
             }
