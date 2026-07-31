@@ -8,40 +8,56 @@
 - Fabric Loom 1.3.10, Yarn 1.20.1+build.10, Fabric API 0.86.1+1.20.1
 - Java 17, Minecraft 1.20.1
 - Папка апдейтов: continent-mod-updated/ (зеркальная структура src/)
-- Рабочая копия: continent-mod/ (на машине пользователя, F:\continent-mod\)
+- Рабочая копия: continent-mod/ (на машине пользователя, F:\continent-mod V2\continent-mod)
 
-## 7 PNG КАРТ (3000×3000, кладутся в корень мира /run/)
+## 7 PNG КАРТ (3000×3000, кладутся в mods/continent-mod-maps/)
 height.png, temperature.png, humidity.png, erosion.png,
-sea-ocean.png, map_rivers.png, map_lakes.png
+sea-ocean.png (RGBA, НЕ Grayscale!), map_rivers.png, map_lakes.png
 
 ## ПАПКА КОНЦЕПЦИИ
 continent-mod-updated/ — staging (зеркальная структура).
 check_structure.py, map_locator.py, error_list.txt,
 MANDATORY_PROJECT_DETAILS.txt — в КОРНЕ continent-mod-updated/.
 
+## ПАПКА ВАЖНОЕ (КОРЕНЬ WORKSPACE)
+- Расположение: корень workspace (рядом с continent-mod-updated/, upload/)
+- СОДЕРЖИТ: ТЕХНИЧЕСКОЕ_ОПИСАНИЕ_ПРОЕКТА.txt, MANDATORY_PROJECT_DETAILS.txt,
+  error_list.txt, ВЕЩИ НЕОБХОДИМЫЕ ДЛЯ ПРОВЕРКИ.txt
+- ⛔️ АБСОЛЮТНО ЗАПРЕЩЕНО: удалять, переименовывать или изменять
+  ЛЮБЫЕ файлы из папки ВАЖНОЕ без ПРЯМОГО УКАЗАНИЯ пользователя.
+  Исключение: пользователь явно приказал обновить конкретный файл.
+
 ## ЗАПРЕЩЕНО
-1. Создавать файлы в src/main/java/com/continentgen/mixin/
+1. Вода рек/озёр на фиксированном SEA_LEVEL.
+   → Создаёт перепад до 128 блоков на берегах горных рек.
+   → Правильно: terrain carving — русло = понижение рельефа,
+     вода следует за terrainHeight (waterLevel = terrainHeight - CARVE_DEPTH * riverNess).
+2. Создавать файлы в src/main/java/com/continentgen/mixin/
    → Mixin вызывал краши, папка и файлы УДАЛЕНЫ.
    → continentgen.mixins.json: "client": [] (пустой)
-2. Импорт net.minecraft.world.biome.BiomeAccess
+3. Импорт net.minecraft.world.biome.BiomeAccess
    → НЕ существует в Yarn 1.20.1.
    → Правильно: net.minecraft.world.biome.source.BiomeAccess
-3. SimplexNoise / шумовые оверлеи в terrain
+4. SimplexNoise / шумовые оверлеи в terrain
    → Вызывают круги-артефакты на поверхности.
-4. Удалять override carve() — метод АБСТРАКТНЫЙ в ChunkGenerator.
+5. Удалять override carve() — метод АБСТРАКТНЫЙ в ChunkGenerator.
    → ВСЕГДА override с пустым телом (no-op).
-5. DrawableHelper → УДАЛЁН в MC 1.20.1. Использовать DrawContext.
-6. DEFAULT_WORLD_SIZE = 300_000 → ВСЕГДА 150_000.
+6. DrawableHelper → УДАЛЁН в MC 1.20.1. Использовать DrawContext.
+7. DEFAULT_WORLD_SIZE = 300_000 → ВСЕГДА 150_000.
 
 ## ОБЯЗАТЕЛЬНО
-1. Комментарии в коде на русском.
-2. При ошибке: сначала error_list.txt → обновить → потом исправлять.
-3. После изменений: python3 check_structure.py — 0 ошибок.
-4. Все апдейты ТОЛЬКО в continent-mod-updated/.
-5. Проверять что методы вызываемые в ChunkGenerator/BiomeSource
+1. После КАЖДОГО обновления кода создавать архив continent-mod-updated.zip
+   в корне workspace (zip src/, build.gradle, settings.gradle, gradle.properties,
+   gradle/, check_structure.py, map_locator.py).
+   Без исключений. Это нужно для передачи пользователю.
+2. Комментарии в коде на русском.
+3. При ошибке: сначала error_list.txt → обновить → потом исправлять.
+4. После изменений: python3 check_structure.py — 0 ошибок.
+5. Все апдейты ТОЛЬКО в continent-mod-updated/.
+6. Проверять что методы вызываемые в ChunkGenerator/BiomeSource
    существуют в MapData.java (рассинхрон = ошибки компиляции).
-6. Константы (DEFAULT_WORLD_SIZE, SEA_LEVEL) совпадают во ВСЕХ файлах.
-7. BiomeSource.getBiome получает quart-координаты → сдвиг x<<2, z<<2.
+7. Константы (DEFAULT_WORLD_SIZE, SEA_LEVEL) совпадают во ВСЕХ файлах.
+8. BiomeSource.getBiome получает quart-координаты → сдвиг x<<2, z<<2.
 
 ## КЛЮЧЕВЫЕ КОНСТАНТЫ
 - DEFAULT_WORLD_SIZE = 150_000
