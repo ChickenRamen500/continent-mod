@@ -1,0 +1,15 @@
+{
+  "dimensions": {
+    "minecraft:overworld": {
+      "type": "minecraft:overworld",
+      "generator": {
+        "type": "continentgen:continent",
+        "seed": 0,
+        "biome_source": {
+          "type": "continentgen:continent",
+          "seed": 0
+        }
+      }
+    }
+  }
+}

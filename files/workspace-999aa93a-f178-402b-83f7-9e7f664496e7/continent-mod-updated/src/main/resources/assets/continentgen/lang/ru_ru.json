@@ -1,0 +1,14 @@
+{
+  "generator.continentgen.continent": "Континенты",
+  "continentgen.customize.title": "Настройка мира континентов",
+  "continentgen.customize.map_size": "Размер мира",
+  "continentgen.customize.map_size_label": "Размер мира (блоков на сторону):",
+  "continentgen.customize.map_size_hint": "По умолчанию: %1$s  |  Минимум: %2$s  |  Максимум: %3$s",
+  "continentgen.customize.description": "Введите размер мира в блоках. Карта PNG 3000×3000 пикселей масштабируется под этот размер. Чем больше мир — тем больше блоков на пиксель (меньше деталей).",
+  "continentgen.customize.done": "Готово",
+  "continentgen.customize.cancel": "Отмена",
+  "continentgen.customize.error.empty": "Пожалуйста, введите размер мира.",
+  "continentgen.customize.error.too_small": "Значение слишком мало. Минимум: %s блоков.",
+  "continentgen.customize.error.too_big": "Значение слишком велико. Максимум: %s блоков.",
+  "continentgen.customize.error.invalid": "Некорректное число."
+}
