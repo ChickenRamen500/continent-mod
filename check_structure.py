@@ -114,12 +114,12 @@ print("\n📁 Optional root files:")
 for f in sorted(OPTIONAL_ROOT):
     check(f, f, required=False)
 
-print("\n📁 Optional maps/ folder:")
+print("\n📁 Optional maps/ folder (or mods/continent-mod-maps/):")
 if os.path.isdir("maps"):
     map_count = len([f for f in os.listdir("maps") if f.endswith(".png")])
     print(f"  ✅ maps/ folder exists ({map_count} PNG files)")
 else:
-    print("  ⚠️  maps/ folder not found (place 7 PNG maps here when testing)")
+    print("  ⚠️  maps/ folder not found (PNG maps go in mods/continent-mod-maps/ in-game)")
     warnings += 1
 
 print("\n🚫 Forbidden files check:")
@@ -156,6 +156,8 @@ REQUIRED_MAPDATA_METHODS = [
     "isRiver",
     "isLake",
     "getHeight",
+    "getRiverNess",
+    "getLakeNess",
 ]
 if os.path.exists(mapdata):
     with open(mapdata, "r") as f:
@@ -166,6 +168,50 @@ if os.path.exists(mapdata):
         else:
             print(f"  ❌ MapData.{method}() MISSING")
             errors += 1
+
+# ─── Constants check ─────────────────────────────────────────
+print("\n📋 Constants check:")
+if os.path.exists(mapdata):
+    with open(mapdata, "r") as f:
+        content = f.read()
+    if "DEFAULT_WORLD_SIZE = 150_000" in content:
+        print("  ✅ DEFAULT_WORLD_SIZE = 150_000")
+    else:
+        print("  ❌ DEFAULT_WORLD_SIZE is NOT 150_000!")
+        errors += 1
+    if "SEA_LEVEL = 63" in content:
+        print("  ✅ SEA_LEVEL = 63")
+    else:
+        print("  ❌ SEA_LEVEL is NOT 63!")
+        errors += 1
+    # Проверка ЗАПРЕЩЁННОГО импорта BiomeAccess
+    if "net.minecraft.world.biome.BiomeAccess" in content:
+        print("  ❌ ЗАПРЕЩЁННЫЙ импорт: net.minecraft.world.biome.BiomeAccess")
+        errors += 1
+    else:
+        print("  ✅ Нет запрещённого импорта BiomeAccess")
+
+# ─── SimplexNoise check (ЗАПРЕЩЁН в ChunkGenerator) ───────────────
+chunkgen = "src/main/java/com/continentgen/world/ContinentChunkGenerator.java"
+if os.path.exists(chunkgen):
+    with open(chunkgen, "r") as f:
+        cg_content = f.read()
+    if "SimplexNoise" in cg_content:
+        print("\n  ❌ ЗАПРЕЩЁН: SimplexNoise найден в ContinentChunkGenerator!")
+        errors += 1
+    else:
+        print("\n  ✅ SimplexNoise отсутствует в ContinentChunkGenerator (OK)")
+
+# ─── ContinentCustomizeScreen world size check ─────────────────────
+customize = "src/main/java/com/continentgen/client/ContinentCustomizeScreen.java"
+if os.path.exists(customize):
+    with open(customize, "r") as f:
+        cs_content = f.read()
+    if "DEFAULT_WORLD_SIZE = 150_000" in cs_content:
+        print("  ✅ ContinentCustomizeScreen: DEFAULT_WORLD_SIZE = 150_000")
+    else:
+        print("  ❌ ContinentCustomizeScreen: DEFAULT_WORLD_SIZE НЕ 150_000!")
+        errors += 1
 
 # ─── Summary ──────────────────────────────────────────────────────
 print("\n" + "=" * 60)

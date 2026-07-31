@@ -6,7 +6,7 @@
         "type": "continentgen:continent",
         "biome_source": {
           "type": "continentgen:continent",
-          "world_size": 300000
+          "world_size": 150000
         }
       }
     },
