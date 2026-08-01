@@ -1,0 +1,870 @@
+     1→════════════════════════════════════════════════════════════════════════════
+     2→  ТЕХНИЧЕСКОЕ ОПИСАНИЕ ПРОЕКТА — Continent Generator Mod
+     3→  Версия: v5 (28.07.2026) | Восстановлено: 29.07.2026
+     4→════════════════════════════════════════════════════════════════════════════
+     5→
+     6→СОДЕРЖАНИЕ
+     7→  1. Общая концепция
+     8→  2. Технологический стек
+     9→  3. 7 PNG карт — формат и назначение
+    10→  4. Система координат и тороидальное замыкание
+    11→  5. Структура проекта и файлы
+    12→  6. MapData.java — хранилище карт и запросов
+    13→  7. ContinentChunkGenerator.java — генерация рельефа
+    14→  8. ContinentBiomeSource.java — выбор биомов
+    15→  9. Климатические зоны и биомная матрица
+    16→  10. Клиентские экраны (Customize, LevelScreenProvider)
+    17→  11. WorldBorderHandler — тороидальные границы
+    18→  12. Константы и пороги
+    19→  13. Ресурсы и конфигурация
+    20→  14. Запрещённые паттерны
+    21→  15. Утилиты (check_structure.py, map_locator.py)
+    22→  16. Ключевые архитектурные решения
+    23→  17. Известные проблемы и пендинг задачи
+    24→  18. История версий
+    25→
+    26→
+    27→════════════════════════════════════════════════════════════════════════════
+    28→1. ОБЩАЯ КОНЦЕПЦИЯ
+    29→════════════════════════════════════════════════════════════════════════════
+    30→
+    31→Continent Generator Mod — Fabric мод для Minecraft 1.20.1, который
+    32→генерирует процедурный мир на основе 7 пользовательских PNG карт
+    33→размером 3000×3000 пикселей.
+    34→
+    35→Вместо ванильного шумового генератора, мод читает готовые карты мира
+    36→(высота, температура, влажность, эрозия, океаны, реки, озёра) и строит
+    37→рельеф, выбирает биомы и размещает воду напрямую по пикселям карты.
+    38→
+    39→Пользователь может создать карты в любом графическом редакторе (GIMP,
+    40→Photoshop, QGIS) по заранее определённой цветовой схеме и получить
+    41→точный мир, повторяющий нарисованный контур.
+    42→
+    43→Ключевое преимущество — полный контроль над миром: реальная карта Земли,
+    44→фэнтезийный континент, вымышленная планета — всё это возможно.
+    45→
+    46→
+    47→════════════════════════════════════════════════════════════════════════════
+    48→2. ТЕХНОЛОГИЧЕСКИЙ СТЕК
+    49→════════════════════════════════════════════════════════════════════════════
+    50→
+    51→  Компонент              Версия / Значение
+    52→  ─────────────────────────────────────────────
+    53→  Fabric Loom            1.3.10
+    54→  Yarn Mappings          1.20.1+build.10
+    55→  Fabric API             0.86.1+1.20.1
+    56→  Minecraft              1.20.1
+    57→  Java                   17
+    58→  Gradle                 8.6 (wrapper)
+    59→  Build system           Fabric Loom + Gradle
+    60→
+    61→  Yarn — это набор маппингов (переименований) для Minecraft кода.
+    62→  Важные классы и их Yarn-имена:
+    63→    ChunkGenerator       → net.minecraft.world.gen.chunk.ChunkGenerator
+    64→    BiomeSource          → net.minecraft.world.biome.source.BiomeSource
+    65→    BiomeAccess          → net.minecraft.world.biome.source.BiomeAccess
+    66→    RegistryKeys         → net.minecraft.registry.RegistryKeys
+    67→    BuiltinRegistries    → net.minecraft.registry.BuiltinRegistries
+    68→    DrawContext          → net.minecraft.client.gui.DrawContext (НЕ DrawableHelper)
+    69→
+    70→
+    71→════════════════════════════════════════════════════════════════════════════
+    72→3. 7 PNG КАРТ — ФОРМАТ И НАЗНАЧЕНИЕ
+    73→════════════════════════════════════════════════════════════════════════════
+    74→
+    75→Все карты должны быть размером 3000×3000 пикселей и лежать в корневой
+    76→папке мира Minecraft (там же где level.dat, обычно .minecraft/run/).
+    77→
+    78→  ┌─────────────────┬──────────┬──────────────────────────────────────────┐
+    79→  │ Файл            │ Формат   │ Описание                                │
+    80→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+    81→  │ height.png      │ Grayscale│ Карта высот. 0 = MIN_Y (-64),          │
+    82→  │                 │ 8-bit    │ 255 = MAX_TERRAIN (200).                │
+    83→  │                 │          │ Формула: Y = MIN_Y + (h/255) *          │
+    84→  │                 │          │   (MAX_TERRAIN - MIN_Y)                  │
+    85→  │                 │          │ При worldSize=150000: 1 пиксель = 50     │
+    86→  │                 │          │ блоков. Билинейная интерполяция.         │
+    87→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+    88→  │ temperature.png │ RGB (24b)│ Цветовая палитра — 6 цветов по зонам:   │
+    89→  │                 │          │ ARCTIC=#7F8B99, SUBARCTIC=#88B4D7,      │
+    90→  │                 │          │ TEMPERATE=#6CC889, TROPICAL=#F7FB83,     │
+    91→  │                 │          │ SUBEQUATORIAL=#E7BD83, EQUATORIAL=#CE82  │
+    92→  │                 │          │ Матчится по ближайшему цвету (Euclidean  │
+    93→  │                 │          │ distance в RGB пространстве).            │
+    94→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+    95→  │ humidity.png     │ Grayscale│ Влажность: 0 = сухо, 255 = очень      │
+    96→  │                 │ 8-bit    │ влажно. Порог: <128 = сухо, >=128 =     │
+    97→  │                 │          │ влажно (2 корзины для биомов).           │
+    98→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+    99→  │ erosion.png     │ Grayscale│ Эрозия: 0 = острые пики/хребты,         │
+   100→  │                 │ 8-bit    │ 255 = плоские равнины.                   │
+   101→  │                 │          │ В текущей версии НЕ влияет на рельеф     │
+   102→  │                 │          │ (SimplexNoise удалён). Используется       │
+   103→  │                 │          │ BiomeParameters для отладки.               │
+   104→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+   105→  │ sea-ocean.png   │ Grayscale│ Маска океана/суши.                       │
+   106→  │                 │ 8-bit    │ 255 = суша, <255 = океан.               │
+   107→  │                 │          │ OCEAN_THRESHOLD = 255.                   │
+   108→  │                 │          │ Глубокий океан: значение <= 80.          │
+   109→  │                 │          │ getOceanNess() — билинейная интерполяция│
+   110→  │                 │          │ бинарной маски → плавные берега.        │
+   111→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+   112→  │ map_rivers.png  │ RGBA     │ Маска рек. RGBA изображение.             │
+   113→  │                 │          │ Вода = пиксель с alpha > 0 И             │
+   114→  │                 │          │ red < 128. Всё остальное = суша.        │
+   115→  │                 │          │ WATER_RED_THRESHOLD = 128.               │
+   116→  │                 │          │ Хранится как boolean[][] (true=вода).   │
+   117→  │                 │          │ getRiverNess() — билинейная [0..1].     │
+   118→  ├─────────────────┼──────────┼──────────────────────────────────────────┤
+   119→  │ map_lakes.png   │ RGBA     │ Маска озёр. Формат идентичен рекам.       │
+   120→  │                 │          │ getLakeNess() — билинейная [0..1].      │
+   121→  └─────────────────┴──────────┴──────────────────────────────────────────┘
+   122→
+   123→ ВАЖНО: height.png использует СЖАТЫЙ диапазон (MAX_TERRAIN=200, НЕ 320).
+   124→  Это значит: 0 → Y=-64, 255 → Y=200 (высота 264 блоков, а не 384).
+   125→  Максимальная высота гор = Y=200, а не Y=320.
+   126→
+   127→
+   128→════════════════════════════════════════════════════════════════════════════
+   129→4. СИСТЕМА КООРДИНАТ И ТОРОИДАЛЬНОЕ ЗАМЫКАНИЕ
+   130→════════════════════════════════════════════════════════════════════════════
+   131→
+   132→  Мировые координаты → пиксельные:
+   133→    pixelX = ((worldX + worldSize/2) / worldSize) * imageWidth
+   134→    pixelZ = ((worldZ + worldSize/2) / worldSize) * imageHeight
+   135→
+   136→  Центр мира (0, 0) → центр картинки (1500, 1500).
+   137→  Левый край мира (-worldSize/2) → левый край картинки (0).
+   138→  Правый край мира (+worldSize/2) → правый край картинки (2999).
+   139→
+   140→  Масштаб:
+   141→    blocksPerPixel = worldSize / imageWidth
+   142→    При worldSize=150000: blocksPerPixel = 150000/3000 = 50
+   143→
+   144→  Тороидальное замыкание:
+   145→    Координаты пикселей оборачиваются через modulo:
+   146→      wrappedX = ((x % imageWidth) + imageWidth) % imageWidth
+   147→    Это позволяет переходить через край карты — левый край
+   148→    соединяется с правым, верхний с нижним (как на тороиде).
+   149→
+   150→  Перенос между краями мира (Pac-Man эффект):
+   151→    WorldBorderHandler телепортирует игрока:
+   152→      x >= halfWorld → x - worldSize + 1
+   153→      x <= -halfWorld → x + worldSize - 1
+   154→    Предупреждение: эффект темноты за 50 блоков от границы.
+   155→
+   156→
+   157→════════════════════════════════════════════════════════════════════════════
+   158→5. СТРУКТУРА ПРОЕКТА И ФАЙЛЫ
+   159→════════════════════════════════════════════════════════════════════════════
+   160→
+   161→  continent-mod-updated/
+   162→  ├── build.gradle                          — Gradle build (Fabric Loom 1.3.10)
+   163→  ├── settings.gradle                      — Maven репозитории
+   164→  ├── gradle.properties                    — Версии MC, Yarn, Fabric
+   165→  ├── gradle/wrapper/gradle-wrapper.props  — Gradle 8.6
+   166→  │
+   167→  ├── check_structure.py                   — Валидация структуры проекта
+   168→  ├── map_locator.py                        — Генератор карты биомов + навигация
+   169→  │
+   170→  ├── ВАЖНОЕ/                               — Документация и описания
+   171→  │   ├── ТЕХНИЧЕСКОЕ_ОПИСАНИЕ_ПРОЕКТА.txt  ← этот файл
+   172→  │   ├── ВЕЩИ НЕОБХОСТИМЫЕ ДЛЯ ПРОВЕРКИ.txt
+   173→  │   ├── MANDATORY_PROJECT_DETAILS.txt
+   174→  │   └── error_list.txt
+   175→  │
+   176→  └── src/main/
+   177→      ├── java/com/continentgen/
+   178→      │   │
+   179→      │   ├── ContinentGenMod.java          — ТОЧКА ВХОДА (server-side)
+   180→      │   │   Регистрирует оба Codec (BiomeSource + ChunkGenerator)
+   181→      │   │   и WorldBorderHandler.
+   182→      │   │
+   183→      │   ├── map/
+   184→      │   │   ├── MapData.java              — Хранилище 7 PNG карт.
+   185→      │   │   │   Загрузка, парсинг, координаты, запросы.
+   186→      │   │   │   Синглтон через MapLoader.
+   187→      │   │   │
+   188→      │   │   ├── MapLoader.java            — Singleton lazy-loader.
+   189→      │   │   │   Загружает из CWD (Minecraft run dir).
+   190→      │   │   │
+   191→      │   │   ├── ClimateZone.java          — Enum 6 климатических зон.
+   192→      │   │   │   Цвет → температура → nearest RGB match.
+   193→      │   │   │
+   194→      │   │   └── BiomeParameters.java      — Справочник биомов MC 1.20.1.
+   195→      │   │       40+ BiomeEntry с T/H/C/E/W/D + weight.
+   196→      │   │       nearest-point matching. НЕ используется в BiomeSource.
+   197→      │   │
+   198→      │   ├── world/
+   199→      │   │   ├── ContinentChunkGenerator.java — Генерация рельефа.
+   200→      │   │   │   populateNoise() → generateColumn() → блоки.
+   201→      │   │   │   Содержит всю логику: океан, реки, озёра, суша.
+   202→      │   │   │
+   203→      │   │   ├── ContinentBiomeSource.java   — Выбор биомов.
+   204→      │   │   │   QUART-RESOLUTION fix, BIOME_MATRIX,
+   205→      │   │   │   водные биомы, 12 наземных биомов.
+   206→      │   │   │
+   207→      │   │   ├── BuiltinRegistriesAccess.java — Статический доступ
+   208→      │   │   │   к BuiltinRegistries для fallback биомов.
+   209→      │   │   │
+   210→      │   │   └── WorldBorderHandler.java    — Тороидальные границы.
+   211→      │   │       Телепортация + эффект темноты.
+   212→      │   │
+   213→      │   └── client/
+   214→      │       ├── ContinentGenModClient.java — Клиентский entry point.
+   215→      │       │   Регистрация CustomizeScreen через VarHandle/Unsafe.
+   216→      │       │
+   217→      │       ├── ContinentLevelScreenProvider.java — LevelScreenProvider.
+   218→      │       │   Открывает CustomizeScreen при клике "Настроить".
+   219→      │       │
+   220→      │       └── ContinentCustomizeScreen.java — Экран настройки.
+   221→      │           Текстовое поле для world_size (30..9_999_999).
+   222→      │
+   223→      └── resources/
+   224→          ├── continentgen.mixins.json      — "client": [] (ПУСТОЙ!)
+   225→          ├── fabric.mod.json               — Мод метаданные.
+   226→          ├── data/
+   227→          │   ├── continentgen/worldgen/world_preset/continent.json
+   228→          │   │   — World preset с world_size=150000.
+   229→          │   └── minecraft/
+   230→          │       ├── worldgen/world_preset/continent.json
+   231→          │       │   — Minecraft namespace preset.
+   232→          │       └── tags/worldgen/world_preset/normal.json
+   233→          │           — Добавляет "Continents" в Normal world type.
+   234→          └── assets/continentgen/lang/
+   235→              ├── en_us.json
+   236→              └── ru_ru.json
+   237→
+   238→
+   239→════════════════════════════════════════════════════════════════════════════
+   240→6. MapData.java — ХРАНИЛИЩЕ КАРТ И ЗАПРОСОВ
+   241→════════════════════════════════════════════════════════════════════════════
+   242→
+   243→  Файл: src/main/java/com/continentgen/map/MapData.java
+   244→  Строк: 337
+   245→
+   246→  ОБЯЗАТЕЛЬНО singleton через MapLoader.getInstance().getMapData().
+   247→  НЕ хранит worldSize — передаётся как параметр в каждый метод.
+   248→
+   249→  ─── Массивы данных (row-major, [z][x]) ───
+   250→    byte[][]    heightMap       — высота (grayscale 0-255)
+   251→    byte[][]    temperatureMap  — RGB ([z][x*3] = R,G,B)
+   252→    byte[][]    humidityMap     — влажность (grayscale 0-255)
+   253→    byte[][]    erosionMap      — эрозия (grayscale 0-255)
+   254→    byte[][]    seaOceanMap     — маска океана (grayscale)
+   255→    boolean[][] riversMask     — маска рек (true=вода)
+   256→    boolean[][] lakesMask      — маска озёр (true=вода)
+   257→
+   258→  ─── Методы загрузки ───
+   259→    load(Path mapDir)     — Загружает 7 PNG из указанной папки.
+   260→                           Если файл не найден, заполняет дефолтом.
+   261→    parseGrayscale()      — Извлекает RED канал из ARGB.
+   262→    parseWaterMap()        — RGBA → boolean: alpha>0 AND red<128 = true.
+   263→    parseTemperature()     — RGBA → 3 байта RGB на пиксель.
+   264→
+   265→  ─── Координатные преобразования ───
+   266→    toPixelX(worldX, worldSize)     — int: мировая → пиксельная (floor)
+   267→    toPixelZ(worldZ, worldSize)     — int: мировая → пиксельная (floor)
+   268→    toPixelXDouble(worldX, worldSize) — double: для билинейной
+   269→    toPixelZDouble(worldZ, worldSize) — double: для билинейной
+   270→    wrapX(x) / wrapZ(z)             — тороидальное замыкание
+   271→    getBlocksPerPixel(worldSize)    — масштаб: worldSize / imageWidth
+   272→
+   273→  ─── Методы запроса (все принимают worldSize) ───
+   274→
+   275→    getHeight(worldX, worldZ, worldSize) → int
+   276→      Билинейная интерполяция 4 соседних пикселей heightMap.
+   277→      Формула: MIN_Y + (h/255) * (MAX_TERRAIN - MIN_Y)
+   278→      Диапазон: -64 .. 200.
+   279→
+   280→    getRiverNess(worldX, worldZ, worldSize) → double [0..1]
+   281→      Билинейная интерполяция riversMask (boolean → 0.0/1.0).
+   282→      1.0 = центр русла, 0.0 = суша далеко.
+   283→      НЕ использует circle-based поиск (was causing artifacts).
+   284→
+   285→    getLakeNess(worldX, worldZ, worldSize) → double [0..1]
+   286→      Аналогично getRiverNess для озёр.
+   287→
+   288→    isRiver(worldX, worldZ, worldSize) → boolean
+   289→      getRiverNess() >= RIVER_CHANNEL_THRESHOLD (0.5)
+   290→
+   291→    isLake(worldX, worldZ, worldSize) → boolean
+   292→      getLakeNess() >= LAKE_CHANNEL_THRESHOLD (0.5)
+   293→
+   294→    getOceanNess(worldX, worldZ, worldSize) → double [0..1]
+   295→      Билинейная интерполяция БИНАРНОЙ маски океана:
+   296→      seaOceanMap[pixel] < OCEAN_THRESHOLD (255) → 1.0, иначе 0.0.
+   297→      Плавный берег через bilinear blending.
+   298→
+   299→    isOcean(worldX, worldZ, worldSize) → boolean
+   300→      seaOceanMap[pixel] < OCEAN_THRESHOLD (nearest-neighbour).
+   301→
+   302→    isDeepOcean(worldX, worldZ, worldSize) → boolean
+   303→      seaOceanMap[pixel] <= DEEP_OCEAN_THRESHOLD (80).
+   304→
+   305→    getSeaOceanDepth(worldX, worldZ, worldSize) → int [0..255]
+   306→      Сырое значение пикселя (nearest-neighbour).
+   307→
+   308→    getClimateZone(worldX, worldZ, worldSize) → ClimateZone
+   309→      Пиксель temperature.png → RGB → nearest ClimateZone.
+   310→
+   311→    getTemperature(worldX, worldZ, worldSize) → float [0..1]
+   312→      Температура климатической зоны.
+   313→
+   314→    getHumidity(worldX, worldZ, worldSize) → int [0..255]
+   315→      Сырое значение humidity.png (nearest-neighbour).
+   316→
+   317→    getErosion(worldX, worldZ, worldSize) → int [0..255]
+   318→      Сырое значение erosion.png (nearest-neighbour).
+   319→
+   320→  ─── Нормализованные параметры (для BiomeParameters/debug) ───
+   321→    getTemperatureNorm() → double [-1..1]
+   322→    getHumidityNorm()     → double [-1..1]
+   323→    getContinentalness()  → double [-1.2..1.0]
+   324→      Формула: 0.6 - oceanNess * 1.8, clamp.
+   325→    getErosionNorm()      → double [-1..1]
+   326→    getWeirdness()        → 0.0 (фиксированный)
+   327→    getDepthNorm(y)       → double [-1..1]
+   328→      Формула: ((y - MIN_Y) / (MAX_Y - MIN_Y)) * 2.0 - 1.0
+   329→
+   330→
+   331→════════════════════════════════════════════════════════════════════════════
+   332→7. ContinentChunkGenerator.java — ГЕНЕРАЦИЯ РЕЛЬЕФА
+   333→════════════════════════════════════════════════════════════════════════════
+   334→
+   335→  Файл: src/main/java/com/continentgen/world/ContinentChunkGenerator.java
+   336→  Строк: 296
+   337→  Наследует: net.minecraft.world.gen.chunk.ChunkGenerator
+   338→
+   339→  ─── Константы генератора ───
+   340→    RIVER_DEPTH = 4              — Глубина русла реки (в блоках)
+   341→    LAKE_DEPTH = 3               — Глубина дна озера (в блоках)
+   342→    SURFACE_BLOCK_COUNT = 4      — Слои подповерхностных блоков (dirt/sand)
+   343→    RIVER_BANK_RANGE = 0.3       — Диапазон плавного берега
+   344→    LAKE_BANK_RANGE = 0.3
+   345→
+   346→  ─── Instance fields ───
+   347→    worldSize (int)              — Размер мира, читается из BiomeSource
+   348→    mapData (MapData)            — Ссылка на singleton MapData
+   349→    seed (long)                  — Сид генерации
+   350→
+   351→  ─── Ключевые методы ───
+   352→    getSeaLevel()    → MapData.SEA_LEVEL (63)
+   353→    getMinimumY()    → -64
+   354→    getWorldHeight() → 384
+   355→
+   356→    populateNoise() — Главная точка входа.
+   357→      Для каждого чанка (16×16):
+   358→        1. Если карты не загружены → fallback (bedrock + stone + water).
+   359→        2. Иначе → generateColumn() для каждой колонки.
+   360→        3. populateBiomesSafe() — заполнение биомов в чанке.
+   361→
+   362→    carve()         — No-op (предотвращает ванильные пещеры).
+   363→    buildSurface()  — No-op (поверхность уже в populateNoise).
+   364→
+   365→  ─── ЛОГИКА generateColumn() (v5) ───
+   366→
+   367→  Для каждой колонки вычисляются:
+   368→    terrainHeight = getHeight(worldX, worldZ, worldSize)
+   369→    oceanNess = getOceanNess(worldX, worldZ, worldSize)
+   370→    riverNess = getRiverNess(worldX, worldZ, worldSize)
+   371→    lakeNess = getLakeNess(worldX, worldZ, worldSize)
+   372→
+   373→  Приоритет решения (от высшего к низшему):
+   374→
+   375→  1. ОКЕАН (oceanNess >= 0.5):
+   376→     surfaceY = lerp(oceanFloor, terrainHeight, 1-oceanNess)
+   377→     waterSurfaceY = SEA_LEVEL (63)
+   378→     hasWater = true
+   379→     Пол плавно переходит от terrainHeight к oceanFloor.
+   380→
+   381→  2. РУСЛО РЕКИ (riverNess >= 0.5):
+   382→     waterSurfaceY = SEA_LEVEL
+   383→     centerFactor = (riverNess - 0.5) / 0.5   — 0 на краю, 1 в центре
+   384→     depth = RIVER_DEPTH * centerFactor        — параболическое русло
+   385→     surfaceY = SEA_LEVEL - depth
+   386→     hasWater = true
+   387→
+   388→  3. РУСЛО ОЗЕРА (lakeNess >= 0.5):
+   389→     Аналогично реке, но LAKE_DEPTH=3 (мельче).
+   390→
+   391→  4. БЕРЕГ РЕКИ/ОЗЕРА (riverNess >= 0.2 ИЛИ lakeNess >= 0.2):
+   392→     bankNess = max(riverNess, lakeNess)
+   393→     blendFactor = (bankNess - 0.2) / 0.3    — [0..1]
+   394→     surfaceY = lerp(terrainHeight, SEA_LEVEL, blendFactor)
+   395→     Если surfaceY < SEA_LEVEL → hasWater.
+   396→
+   397→  5. СУША (всё остальное):
+   398→     surfaceY = terrainHeight
+   399→     Если surfaceY < SEA_LEVEL → заливается водой.
+   400→
+   401→  ─── Заполнение колонки ───
+   402→  От bottomY (-64) до max(surfaceY, waterSurfaceY):
+   403→    y > surfaceY И y <= waterSurfaceY  → WATER
+   404→    y == surfaceY                      → surface block (зависит от temp)
+   405→    y > surfaceY-4 И y > bottomY      → DIRT (суша) / GRAVEL (вода)
+   406→    остальное                          → STONE
+   407→    y == bottomY (-64)                 → BEDROCK (перезаписывает)
+   408→
+   409→  ─── Surface Block выбор ───
+   410→    getSurfaceBlock(x, z, surfaceY):
+   411→      surfaceY <= seaLevel + 1 → SAND (пляж)
+   412→      temp < 0.15             → SNOW_BLOCK (арктика)
+   413→      temp > 0.85 & Y < 100   → SAND (пустыня/дюны)
+   414→      иначе                    → GRASS_BLOCK (трава)
+   415→
+   416→    getUnderwaterSurfaceBlock(x, z, surfaceY):
+   417→      temp < 0.15 → DIRT
+   418→      иначе        → SAND
+   419→
+   420→  ─── F3 Debug HUD ───
+   421→  getDebugHudText() показывает:
+   422→    "Continent Generator (v5 — bilinear rivers)"
+   423→    Карты: Загружены/НЕ НАЙДЕНЫ
+   424→    Высота | Уровень моря
+   425→    Океан | Глуб.океан
+   426→    Река (riverNess) | Озеро (lakeNess)
+   427→    Климат
+   428→    Континентальность
+   429→
+   430→
+   431→════════════════════════════════════════════════════════════════════════════
+   432→8. ContinentBiomeSource.java — ВЫБОР БИОМОВ
+   433→════════════════════════════════════════════════════════════════════════════
+   434→
+   435→  Файл: src/main/java/com/continentgen/world/ContinentBiomeSource.java
+   436→  Строк: 366
+   437→  Наследует: net.minecraft.world.biome.source.BiomeSource
+   438→
+   439→  ─── Codec Design ───
+   440→  MAP_CODEC = RecordCodecBuilder.mapCodec(
+   441→    instance.group(
+   442→      RegistryOps.getEntryLookupCodec(RegistryKeys.BIOME),  // biome registry
+   443→      Codec.LONG.optionalFieldOf("seed", 0L),
+   444→      Codec.INT.optionalFieldOf("world_size", DEFAULT_WORLD_SIZE)  // 150000
+   445→    ).apply(...)
+   446→  );
+   447→  CODEC = MAP_CODEC.codec();
+   448→
+   449→  RegistryOps.getEntryLookupCodec() возвращает RecordCodecBuilder,
+   450→  а НЕ MapCodec — .forGetter() НЕ существует. Передаётся напрямую
+   451→  в instance.group(). Это паттерн vanilla MultiNoiseBiomeSource.
+   452→
+   453→  ─── QUART-RESOLUTION FIX (критический!) ───
+   454→  BiomeSource.getBiome(int x, int y, int z, sampler) вызывается
+   455→  с QUART-RESOLUTION координатами: 1 единица = 4 блока.
+   456→  Vanilla BiomeAccess делает pos.getX() >> 2 перед вызовом getBiome.
+   457→
+   458→  Наш FIX: blockX = x << 2; blockZ = z << 2; в начале getBiome().
+   459→  Без этого биомы попадали в 1/4 реальной позиции.
+   460→
+   461→  ─── WORLD SIZE — PER-INSTANCE ───
+   462→  Каждый ContinentBiomeSource хранит СВОЙ worldSize (из codec JSON).
+   463→  MapData НЕ хранит worldSize — передаётся как параметр.
+   464→  Это фиксит баг с multiple instances перезаписывающими singleton.
+   465→
+   466→  ─── Логика getBiome() ───
+   467→
+   468→  Приоритет (от высшего к низшему):
+   469→
+   470→  1. ВОДНЫЕ БИОМЫ (приоритет над сушей):
+   471→     a) oceanNess > 0.5 → getOceanBiome():
+   472→        deep ocean + cold → frozen_ocean
+   473→        deep ocean + warm → deep_ocean
+   474→        shallow + cold    → frozen_ocean
+   475→        shallow + cool    → cold_ocean
+   476→        shallow + warm    → ocean
+   477→     b) isRiver() → river (или frozen_river при temp < 0.15)
+   478→     c) isLake()  → swamp (или frozen_ocean при temp < 0.15)
+   479→
+   480→  2. НАЗЕМНЫЕ БИОМЫ (BIOME_MATRIX):
+   481→     climateIdx = ClimateZone.ordinal()  → 0..5
+   482→     humIdx = (humidity < 128) ? 0 : 1  → 0=dry, 1=wet
+   483→     BIOME_MATRIX[climateIdx][humIdx] → biome key
+   484→
+   485→  3. FALLBACK: plains (или первый элемент biomeEntries).
+   486→
+   487→  ─── Разрешение биомов (biome resolution) ───
+   488→  resolveBiomeEntry(key):
+   489→    1. Сначала dynamic lookup через biomeRegistry.getOrThrow(key)
+   490→    2. При неудаче — static BuiltinRegistriesAccess.getBiomeEntry(key)
+   491→       (может дать ID=-1 на клиенте, но работает)
+   492→
+   493→  Конструктор резолвит ВСЕ биомы при создании:
+   494→    12 наземных + 8 водных + 1 fallback (plains) = 21 entry.
+   495→  Логируется resolved/failed count.
+   496→
+   497→
+   498→════════════════════════════════════════════════════════════════════════════
+   499→9. КЛИМАТИЧЕСКИЕ ЗОНЫ И БИОМНАЯ МАТРИЦА
+   500→════════════════════════════════════════════════════════════════════════════
+   501→
+   502→  ClimateZone (enum, ClimateZone.java):
+   503→  ┌──────────────┬──────────┬───────────┬────────────────────────┐
+   504→  │ Zone         │ Color    │ Temp      │ RGB                     │
+   505→  ├──────────────┼──────────┼───────────┼────────────────────────┤
+   506→  │ ARCTIC       │ #7F8B99  │ 0.05      │ (127,139,153)           │
+   507→  │ SUBARCTIC    │ #88B4D7  │ 0.25      │ (136,180,215)           │
+   508→  │ TEMPERATE    │ #6CC889  │ 0.50      │ (108,200,137)           │
+   509→  │ TROPICAL     │ #F7FB83  │ 0.75      │ (247,251,131)           │
+   510→  │ SUBEQUATORIAL│ #E7BD83  │ 0.90      │ (231,189,131)           │
+   511→  │ EQUATORIAL   │ #CE8284  │ 1.00      │ (206,130,132)           │
+   512→  └──────────────┴──────────┴───────────┴────────────────────────┘
+   513→
+   514→  Matching: Euclidean distance в RGB пространстве (fromRGB()).
+   515→
+   516→  BIOME_MATRIX [6 климатических зон × 2 влажности]:
+   517→  ┌──────────────┬──────────────┬──────────────┐
+   518→  │ Климат       │ Сухо (<128)  │ Влажно (≥128)│
+   519→  ├──────────────┼──────────────┼──────────────┤
+   520→  │ ARCTIC       │ snowy_plains │ snowy_slopes │
+   521→  │ SUBARCTIC    │ taiga        │ snowy_taiga  │
+   522→  │ TEMPERATE    │ plains       │ forest       │
+   523→  │ TROPICAL     │ savanna      │ jungle       │
+   524→  │ SUBEQUATORIAL│ badlands     │ mangrove_swamp│
+   525→  │ EQUATORIAL   │ desert       │ bamboo_jungle │
+   526→  └──────────────┴──────────────┴──────────────┘
+   527→
+   528→  Эта матрица ТОЧНО совпадает с biome_rules в map_locator.py.
+   529→
+   530→  Водные биомы (ContinentBiomeSource):
+   531→    ocean, deep_ocean, cold_ocean, frozen_ocean
+   532→    river, frozen_river
+   533→    swamp (для озёр)
+   534→
+   535→
+   536→════════════════════════════════════════════════════════════════════════════
+   537→10. КЛИЕНТСКИЕ ЭКРАНЫ (Customize, LevelScreenProvider)
+   538→════════════════════════════════════════════════════════════════════════════
+   539→
+   540→  ContinentCustomizeScreen.java (312 строк):
+   541→    Экран настройки мира — текстовое поле для world_size.
+   542→    Диапазон: 30 .. 9_999_999 блоков.
+   543→    DEFAULT_WORLD_SIZE = 150_000.
+   544→    Показывает: blocks per pixel, default/min/max.
+   545→    "Done" создаёт новый BiomeSource + ChunkGenerator
+   546→    с выбранным worldSize через worldCreator.applyModifier().
+   547→    Использует DrawContext API (MC 1.20.1, НЕ DrawableHelper).
+   548→
+   549→  ContinentLevelScreenProvider.java (42 строки):
+   550→    Реализует LevelScreenProvider.createEditScreen().
+   551→    Открывает ContinentCustomizeScreen с текущим worldSize
+   552→    из ContinentChunkGenerator.
+   553→
+   554→  ContinentGenModClient.java (211 строк):
+   555→    Клиентский entry point (ClientModInitializer).
+   556→    Регистрирует ContinentLevelScreenProvider в
+   557→    LevelScreenProvider.WORLD_PRESET_TO_SCREEN_PROVIDER.
+   558→
+   559→    Регистрация — многослойная (redundant):
+   560→      1. Проверяет: Mixin уже добавил? (если да → return)
+   561→      2. Пытается .put() на mutable Map (если Mixin заменил)
+   562→      3. VarHandle через privateLookupIn
+   563→      4. sun.misc.Unsafe.putObject
+   564→      5. Field.set после очистки FINAL
+   565→
+   566→    NOTE: Mixin LevelScreenProviderMixin был УДАЛЁН (вызывал краши).
+   567→    continentgen.mixins.json содержит "client": [].
+   568→
+   569→
+   570→════════════════════════════════════════════════════════════════════════════
+   571→11. WORLDBORDERHANDLER — ТОРОИДАЛЬНЫЕ ГРАНИЦЫ
+   572→════════════════════════════════════════════════════════════════════════════
+   573→
+   574→  Файл: WorldBorderHandler.java (91 строк)
+   575→  Реализует: ServerTickEvents.EndWorldTick
+   576→
+   577→  Каждый тик для каждого игрока:
+   578→    1. Читает worldSize из world.getChunkManager().getChunkGenerator()
+   579→       (приведение к ContinentChunkGenerator).
+   580→    2. halfWorld = worldSize / 2.
+   581→    3. Если x >= halfWorld → teleport(x - worldSize + 1)
+   582→       Если x <= -halfWorld → teleport(x + worldSize - 1)
+   583→       Аналогично для z.
+   584→    4. Предупреждение: эффект DARKNESS за 50 блоков от границы.
+   585→    5. После телепорта: DARKNESS amplifier 1 (сильнее).
+   586→
+   587→  Результат: мир тороидальный — можно лететь бесконечно,
+   588→  левый край соединён с правым.
+   589→
+   590→
+   591→════════════════════════════════════════════════════════════════════════════
+   592→12. КОНСТАНТЫ И ПОРОГИ
+   593→════════════════════════════════════════════════════════════════════════════
+   594→
+   595→  ┌─── MapData (должны совпадать с map_locator.py) ──────────────────┐
+   596→  │ DEFAULT_WORLD_SIZE  = 150_000   (НЕ 300_000!)                │
+   597→  │ SEA_LEVEL            = 63         (НЕ 62!)                     │
+   598→  │ MIN_Y                = -64                                      │
+   599→  │ MAX_Y                = 320                                      │
+   600→  │ MAX_TERRAIN          = 200  (сжатый диапазон высот)            │
+   601→  │ OCEAN_THRESHOLD      = 255  (< 255 = океан в sea-ocean.png)    │
+   602→  │ DEEP_OCEAN_THRESHOLD = 80   (<= 80 = глубокий океан)           │
+   603→  │ WATER_RED_THRESHOLD  = 128  (red < 128 AND alpha > 0 = вода)   │
+   604→  │ RIVER_CHANNEL_THRESHOLD = 0.5 (>= → в русле)                    │
+   605→  │ RIVER_BANK_THRESHOLD    = 0.2 (>= → берег реки)               │
+   606→  │ LAKE_CHANNEL_THRESHOLD  = 0.5                                     │
+   607→  │ LAKE_BANK_THRESHOLD     = 0.2                                     │
+   608→  └─────────────────────────────────────────────────────────────────┘
+   609→
+   610→  ┌─── ContinentChunkGenerator ───────────────────────────────────┐
+   611→  │ RIVER_DEPTH      = 4   (блоков, параболическое русло)        │
+   612→  │ LAKE_DEPTH       = 3   (блоков)                                │
+   613→  │ SURFACE_BLOCK_COUNT = 4 (слоя dirt/gravel)                   │
+   614→  │ RIVER_BANK_RANGE = 0.3                                        │
+   615→  │ LAKE_BANK_RANGE  = 0.3                                        │
+   616→  └──────────────────────────────────────────────────────────────┘
+   617→
+   618→  ┌─── WorldBorderHandler ───────────────────────────────────────┐
+   619→  │ WARNING_DISTANCE = 50 блоков от границы                       │
+   620→  └──────────────────────────────────────────────────────────────┘
+   621→
+   622→  ┌─── ContinentCustomizeScreen ───────────────────────────────┐
+   623→  │ DEFAULT_WORLD_SIZE = 150_000                                 │
+   624→  │ MIN_WORLD_SIZE     = 30                                      │
+   625→  │ MAX_WORLD_SIZE     = 9_999_999                               │
+   626→  │ IMAGE_SIZE         = 3000 (пикселей, константа мода)          │
+   627→  └──────────────────────────────────────────────────────────────┘
+   628→
+   629→  При worldSize=150000: blocksPerPixel = 50
+   630→  При worldSize=300000: blocksPerPixel = 100
+   631→  При worldSize=30000:  blocksPerPixel = 10
+   632→
+   633→
+   634→════════════════════════════════════════════════════════════════════════════
+   635→13. РЕСУРСЫ И КОНФИГУРАЦИЯ
+   636→════════════════════════════════════════════════════════════════════════════
+   637→
+   638→  fabric.mod.json:
+   639→    id: continentgen
+   640→    environment: "*" (и клиент, и сервер)
+   641→    entrypoints:
+   642→      main: ContinentGenMod
+   643→      client: ContinentGenModClient
+   644→    mixins: ["continentgen.mixins.json"]
+   645→    depends: fabricloader >=0.14.0, fabric-api, minecraft ~1.20.1, java >=17
+   646→
+   647→  continentgen.mixins.json:
+   648→    package: com.continentgen.mixin
+   649→    client: []  ← ПУСТОЙ! Никаких миксинов.
+   650→    compatibilityLevel: JAVA_17
+   651→
+   652→  data/continentgen/worldgen/world_preset/continent.json:
+   653→    Overworld generator type: continentgen:continent
+   654→    BiomeSource: continentgen:continent, world_size: 150000
+   655→    Nether и End — ванильные.
+   656→
+   657→  data/minecraft/worldgen/world_preset/continent.json:
+   658→    Аналогично, но в minecraft namespace.
+   659→
+   660→  data/minecraft/tags/worldgen/world_preset/normal.json:
+   661→    Добавляет "continentgen:continent" в список normal world presets.
+   662→    Это показывает "Continents" в выпадающем списке "Тип мира".
+   663→
+   664→  gradle.properties:
+   665→    minecraft_version=1.20.1
+   666→    yarn_mappings=1.20.1+build.10
+   667→    loader_version=0.14.22
+   668→    fabric_version=0.86.1+1.20.1
+   669→    mod_version=1.0.0
+   670→
+   671→
+   672→════════════════════════════════════════════════════════════════════════════
+   673→14. ЗАПРЕЩЁННЫЕ ПАТТЕРНЫ
+   674→════════════════════════════════════════════════════════════════════════════
+   675→
+   676→  1. ❌ ФАЙЛЫ В src/main/java/com/continentgen/mixin/
+   677→     → Mixin LevelScreenProviderMixin вызывал Interface <clinit> краш.
+   678→     → Папка mixin/ должна НЕ существовать.
+   679→     → continentgen.mixins.json: "client": [] (пустой).
+   680→
+   681→  2. ❌ Импорт net.minecraft.world.biome.BiomeAccess
+   682→     → НЕ существует в Yarn 1.20.1.
+   683→     → Правильно: net.minecraft.world.biome.source.BiomeAccess
+   684→
+   685→  3. ❌ SimplexNoise / шумовые оверлеи в terrain
+   686→     → Вызывают круги-артефакты на поверхности.
+   687→     → Был удалён из ContinentChunkGenerator в v5.
+   688→
+   689→  4. ❌ Удаление override carve()
+   690→     → carve() — АБСТРАКТНЫЙ метод ChunkGenerator.
+   691→     → ВСЕГДА override с пустым телом (no-op).
+   692→
+   693→  5. ❌ DrawableHelper
+   694→     → Удалён в MC 1.20.1. Использовать DrawContext.
+   695→
+   696→  6. ❌ DEFAULT_WORLD_SIZE = 300_000
+   697→     → ВСЕГДА 150_000.
+   698→
+   699→
+   700→════════════════════════════════════════════════════════════════════════════
+   701→15. УТИЛИТЫ (check_structure.py, map_locator.py)
+   702→════════════════════════════════════════════════════════════════════════════
+   703→
+   704→  check_structure.py (219 строк):
+   705→    Запуск: python3 check_structure.py
+   706→    Проверяет:
+   707→      - 12 обязательных Java файлов
+   708→      - 7 обязательных resource файлов
+   709→      - 3 корневых build файла
+   710→      - Отсутствие mixin/ директории
+   711→      - continentgen.mixins.json client list пуст
+   712→      - MapData API: 13 методов (включая getRiverNess/getLakeNess)
+   713→      - Константы: DEFAULT_WORLD_SIZE=150_000, SEA_LEVEL=63
+   714→      - Нет запрещённого импорта BiomeAccess
+   715→      - Нет SimplexNoise в ContinentChunkGenerator
+   716→      - ContinentCustomizeScreen: DEFAULT_WORLD_SIZE=150_000
+   717→    Exit code: 0 = OK, 1 = missing files, 2 = forbidden files.
+   718→
+   719→  map_locator.py (~680 строк):
+   720→    Запуск: python map_locator.py [--maps-dir DIR] [--output PATH]
+   721→    Функции:
+   722→      - Загружает 7 PNG карт
+   723→      - Генерирует biome_map.png (карта биомов 3000×3000)
+   724→      - Интерактивный режим: ввод координат X Z
+   725→      - Показывает: высота, влажность, температура, биом, эрозия,
+   726→        океан/река/озеро, координаты пикселя и чанка
+   727→      - Рисует маркер на карте
+   728→    Константы Python должны совпадать с Java константами.
+   729→
+   730→
+   731→════════════════════════════════════════════════════════════════════════════
+   732→16. КЛЮЧЕВЫЕ АРХИТЕКТУРНЫЕ РЕШЕНИЯ
+   733→════════════════════════════════════════════════════════════════════════════
+   734→
+   735→  1. БИЛИНЕЙНАЯ ИНТЕРПОЛЯЦИЯ
+   736→     Все маски (высота, реки, озёра, океан) используют билинейную
+   737→     интерполяцию 4 соседних пикселей. Это даёт плавную поверхность
+   738→     без ступеней и без кругов-артефактов.
+   739→
+   740→     Метод: bilinearSample() для boolean масок,
+   741→     inline bilinear для byte масок (height, ocean).
+   742→
+   743→  2. getRiverNess() / getLakeNess() [0..1]
+   744→     Вместо boolean isRiver() (который даёт резкие границы),
+   745→     билинейная интерполяция boolean маски → плавное значение [0..1].
+   746→     Это позволяет:
+   747→       - Параболическое русло (глубже в центре, мельче по краям)
+   748→       - Плавные берега (blendFactor)
+   749→       - Нет резких переходов
+   750→
+   751→  3. PER-INSTANCE WORLD SIZE
+   752→     worldSize НЕ хранится в MapData (singleton).
+   753→     Каждый BiomeSource и ChunkGenerator хранит СВОЙ worldSize.
+   754→     Это предотвращает баг с несколькими instances при загрузке пресетов.
+   755→
+   756→  4. QUART-RESOLUTION FIX
+   757→     BiomeSource.getBiome() получает координаты в 4× более грубом
+   758→     разрешении. Мы сдвигаем <<2 обратно к блочным координатам.
+   759→
+   760→  5. BIOME MATRIX (2D lookup table)
+   761→     Вместо сложного multi-noise matching (vanilla approach),
+   762→     используем простую таблицу 6×2: ClimateZone × humidity bucket.
+   763→     Это ТОЧНО совпадает с map_locator.py → биомы в игре
+   764→     соответствуют предпросмотру.
+   765→
+   766→  6. NO-OP carve() и buildSurface()
+   767→     carve() — пустой (нет ванильных пещер).
+   768→     buildSurface() — пустой (поверхность уже в populateNoise).
+   769→
+   770→  7. PROTOCHUNK.populateBiomes()
+   771→     Стандартный API Yarn 1.20.1 для заполнения биомов в чанке.
+   772→     Вызывается ПОСЛЕ генерации колонок.
+   773→     Fallback: section-by-section populateBiomes().
+   774→
+   775→
+   776→════════════════════════════════════════════════════════════════════════════
+   777→17. ИЗВЕСТНЫЕ ПРОБЛЕМЫ И ПЕНДИНГ ЗАДАЧИ
+   778→════════════════════════════════════════════════════════════════════════════
+   779→
+   780→  [❌ НЕ РЕАЛИЗОВАНО] Terrain Carving для рек/озёр
+   781→    Текущая реализация: вода рек/озёр на SEA_LEVEL (63).
+   782→    В горах (terrainHeight=190, SEA_LEVEL=63) перепад = 127 блоков.
+   783→    Предложенное решение: вода следует за рельефом.
+   784→      waterLevel = terrainHeight - CARVE_DEPTH * riverNess
+   785→      Вода в горах на Y=180, на равнине Y=70.
+   786→      Перепад берег-вода = фиксированный (3-8 блоков).
+   787→
+   788→  [⚠️ ТРЕБУЕТ ТЕСТИРОВАНИЯ] Круги-артефакты
+   789→    SimplexNoise удалён в v5, но возможны остаточные артефакты
+   790→    от nearest-neighbour сэмплирования PNG (в старых версиях).
+   791→    В текущей версии используется билинейная интерполяция —
+   792→    артефакты должны быть устранены.
+   793→
+   794→  [⚠️ ТРЕБУЕТ ТЕСТИРОВАНИЯ] Вода в реках
+   795→    Предыдущая версия snap-to-SEA_LEVEL давала сломанный рельеф.
+   796→    Текущая v5 использует параболическое русло — нужно проверить
+   797→    в игре.
+   798→
+   799→  [⚠️ ТРЕБУЕТ ТЕСТИРОВАНИЯ] Океан/суша
+   800→    Ранее: после обновления map_locator.py координатное преобразование
+   801→    было неправильным (северный океан стал сушей).
+   802→    Текущая координатная формула: ((worldX + worldSize/2) / worldSize)
+   803→    * imageWidth — проверить корректность.
+   804→
+   805→  [⏳ ОТЛОЖЕНО] Кнопка "Настроить"
+   806→    Mixin удалён. VarHandle/Unsafe подход может не работать
+   807→    на JDK 17 (JIT inlining immutable field).
+   808→    ContinentGenModClient пробует 3 стратегии — работает или нет
+   809→    зависит от конкретной JVM.
+   810→
+   811→  [⏳ ОТЛОЖЕНО] Пересчёт humidity/erosion карт
+   812→    Нет скриптов для генерации humidity.png и erosion.png
+   813→    по готовой height.png.
+   814→
+   815→  [⏳ ОТЛОЖЕНО] Обновлённый подход к выбору биомов
+   816→    BiomeParameters.java содержит nearest-point matching по
+   817→    T/H/C/E/W/D параметрам, но BiomeSource использует BIOME_MATRIX.
+   818→    Если будет нужен более точный подбор биомов (с учётом
+   819→    continentalness и erosion) — BiomeParameters готов.
+   820→
+   821→
+   822→════════════════════════════════════════════════════════════════════════════
+   823→18. ИСТОРИЯ ВЕРСИЙ
+   824→════════════════════════════════════════════════════════════════════════════
+   825→
+   826→  v1 (~20.07.2026) — Инициализация
+   827→    - Базовый Fabric мод с ChunkGenerator + BiomeSource
+   828→    - Nearest-neighbour сэмплирование PNG
+   829→    - SimplexNoise для erosion noise
+   830→    - DEFAULT_WORLD_SIZE = 150_000 (изначально)
+   831→    - Нет билинейной интерполяции
+   832→    - Нет quart-resolution fix
+   833→
+   834→  v2 (23-25.07.2026) — Исправление ошибок
+   835→    - BiomeAccess import fix (biome.source)
+   836→    - carve() override (не абстрактный)
+   837→    - DrawableHelper → DrawContext
+   838→    - setRepeatEvents удалён
+   839→    - Mixin LevelScreenProviderMixin удалён
+   840→    - continentgen.mixins.json → "client": []
+   841→
+   842→  v3 (26.07.2026) — Удаление SimplexNoise
+   843→    - SimplexNoise вызывал круги-артефакты → УДАЛЁН
+   844→    - Удалён sampleErosionNoise()
+   845→    - No SimplexNoise / noise overlays в terrain
+   846→
+   847→  v4 (27-28.07.2026) — Реки и озёра
+   848→    - Версия 1: реки следуют высоте (mountains-follow-height)
+   849→      → ОТКЛОНЕНО (горы покрыты 1 блоком воды)
+   850→    - Версия 2: вода на SEA_LEVEL
+   851→      → ОТКЛОНЕНО (перепад 128 блоков в горах)
+   852→    - Контроль кнопки "Настроить" — ОТЛОЖЁН
+   853→
+   854→  v5 (28.07.2026) — Текущая версия
+   855→    - Билинейная интерполяция для ВСЕХ карт
+   856→    - getRiverNess()/getLakeNess() [0..1] вместо isRiver()/isLake()
+   857→    - Параболическое русло рек/озёр
+   858→    - Плавные берега через riverNess/lakeNess blending
+   859→    - oceanNess для плавных берегов океана
+   860→    - Нормализованные параметры: getContinentalness и др.
+   861→    - Quart-resolution fix в BiomeSource
+   862→    - BIOME_MATRIX (12 наземных биомов)
+   863→    - Per-instance worldSize
+   864→    - DEFAULT_WORLD_SIZE = 150_000, SEA_LEVEL = 63
+   865→
+   866→════════════════════════════════════════════════════════════════════════════
+   867→  КОНЕЦ ДОКУМЕНТА
+   868→  Обновлено: 29.07.2026
+   869→════════════════════════════════════════════════════════════════════════════
+   870→

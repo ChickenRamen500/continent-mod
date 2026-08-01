@@ -1,0 +1,116 @@
+════════════════════════════════════════════════════════════════
+  SPISOK OSHIBOK — Continent Generator Mod (Fabric 1.20.1)
+  Формат: [СТАТУС] Описание → Попытка решения
+  СТАТУС: ✅ ИСПРАВЛЕНО | ❌ НЕ ИСПРАВЛЕНО | ⚠️ ЧАСТИЧНО
+════════════════════════════════════════════════════════════════
+
+─── 1. КРАШ ПРИ ЗАПУСКЕ ИГРЫ ────────────────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: java.lang.NoSuchMethodError — DrawableHelper.method
+Причина: В MC 1.20.1 DrawableHelper был удалён, заменён на DrawContext
+Решение: Заменить DrawableHelper → DrawContext во всех клиентских экранах
+
+─── 2. КРАШ ПРИ ЗАПУСКЕ: setRepeatEvents ────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: NoSuchMethodError: Screen.setRepeatEvents
+Причина: В MC 1.20.1 метод больше не нужен (TextFieldWidget сам обрабатывает)
+Решение: Удалить вызов setRepeatEvents(true/false)
+
+─── 3. КРАШ ПРИ ЗАПУСКЕ: UnsupportedOperationException ──────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: Crashed on put() in immutable Map (WORLD_PRESET_TO_SCREEN_PROVIDER)
+Причина: Поле — final Map.of(), нельзя напрямую .put()
+Решение: Mixin + VarHandle/Unsafe для замены immutable map на mutable HashMap
+ОТМЕТКА: Mixin LevelScreenProviderMixin позже УДАЛЁН — вызывал другие краши.
+  Контроль кнопки "Настроить" — ОТЛОЖЁН.
+
+─── 4. КРАШ: Interface mixin <clinit> ───────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: Mixin крашился при инъекции в <clinit> интерфейса LevelScreenProvider
+Решение: Полностью удалён LevelScreenProviderMixin.java и папку mixin/.
+  continentgen.mixins.json → "client": [] (пустой список)
+
+─── 5. ОШИБКА КОМПИЛЯЦИИ: BiomeAccess ───────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: cannot find symbol: class BiomeAccess
+  import net.minecraft.world.biome.BiomeAccess — НЕВЕРНЫЙ путь
+Решение: Правильный импорт: net.minecraft.world.biome.source.BiomeAccess
+  (тот же пакет, где и BiomeSource — biome.source)
+
+─── 6. ОШИБКА КОМПИЛЯЦИИ: carve() абстрактный ───────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: ContinentChunkGenerator is not abstract and does not override
+  abstract method carve(...) in ChunkGenerator
+Причина: Попытка УДАЛИТЬ override carve() — но метод АБСТРАКТНЫЙ в 1.20.1
+  ❌ НЕУДАЧНАЯ ПОПЫТКА: удалить override и импорт BiomeAccess
+Решение: Оставить override с пустым телом + правильный импорт
+  net.minecraft.world.biome.source.BiomeAccess
+
+─── 7. РАССИНХРОН: getContinentalness ───────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: cannot find symbol: method getContinentalness(int,int,int)
+Причина: ContinentChunkGenerator и ContinentBiomeSource ссылались на методы
+  которых нет в текущей MapData.java. Файлы были из разных версий.
+  Недостающие методы: getContinentalness, getTemperatureNorm,
+  getHumidityNorm, getErosionNorm, getWeirdness, getDepthNorm
+Решение: Добавлены все 6 методов в MapData.java
+
+─── 8. КОНСТАНТЫ: DEFAULT_WORLD_SIZE ─────────────────────────────
+[✅ ИСПРАВЛЕНО]
+Ошибка: DEFAULT_WORLD_SIZE = 300_000 вместо 150_000
+  Встречалось в: MapData.java, ContinentCustomizeScreen.java
+Решение: Исправлено на 150_000 в обоих файлах
+
+─── 9. В РЕКАХ НЕТ ВОДЫ ─────────────────────────────────────────
+[❌ НЕ ИСПРАВЛЕНО — требует тестирования]
+Проблема: Вместо воды в реках — сломанный рельеф (riverbed без воды)
+Возможные причины:
+  a) Реки привязаны к SEA_LEVEL (Y=62), а terrain height может быть выше
+  b) Rivers mask parsing неправильно (alpha/red thresholds)
+  c) Реки должны использовать terrain height, не sea level
+
+─── 10. КРУГИ-АРТЕФАКТЫ (в одном биоме нормально, в другом — круги) ─
+[❌ НЕ ИСПРАВЛЕНО — требует тестирования]
+Проблема: В одном биоме поверхность нормальная, в соседних — круги
+Возможные причины:
+  a) SimplexNoise overlay (если используется) создает круги
+  b) Rivers/lakes circle thinning при определённых условиях даёт круги
+  c) Разница в методах интерполяции между версиями
+
+─── 11. MAP_LOCATOR: сломалась координация океан/суша ────────────
+[❌ НЕ ИСПРАВЛЕНО — требует анализа map_locator.py]
+Проблема: После обновления map_locator.py северный океан стал сушей,
+  острова затоплены, Индия разделена заливом
+Причина: Координатное преобразование изменено неправильно
+
+─── 12. SEA-OCEAN.PNG: переход от height map к binary mask ──────
+[⚠️ ЧАСТИЧНО]
+Требование: Вернуть sea-ocean.png как бинарную маску (не height map)
+Текущее состояние: MapData.java использует sea-ocean.png как
+  grayscale height (0=deep ocean, 255=land, OCEAN_THRESHOLD=255).
+  Файл называется "sea-ocean.png" (не "map_sea-ocean.png").
+  Это нужно обсудить — в текущем коде маска работает через threshold.
+
+─── 13. РАССИНХРОНИЗАЦИЯ ФАЙЛОВ ──────────────────────────────
+[⚠️ РИСК]
+Проблема: В continent-mod-updated/ файлы из разных версий.
+  MapData.java — одна версия API, ContinentChunkGenerator.java — другая.
+Решение: После каждой сессии ВСЕГДА проверять:
+  1) python3 check_structure.py — 0 ошибок
+  2) Все методы вызываемые в ChunkGenerator/BiomeSource существуют в MapData
+  3) Константы (DEFAULT_WORLD_SIZE, SEA_LEVEL) совпадают во всех файлах
+
+─── 14. КРАШ: Mixin LevelScreenProviderMixin not found ───────────
+[✅ ИСПРАВЛЕНО — 28.07.2026]
+Ошибка: ClassNotFoundException: com.continentgen.mixin.LevelScreenProviderMixin
+  "Mixin [continentgen.mixins.json:LevelScreenProviderMixin] FAILED during PREPARE"
+Причина: continentgen.mixins.json на машине пользователя содержал
+  "LevelScreenProviderMixin" в client list, но .java файл был удалён.
+  Пользователь не скопировал обновлённый continentgen.mixins.json.
+Решение: Скопировать обновлённый continentgen.mixins.json с "client": []
+ОБЯЗАТЕЛЬНО: При выдаче файлов пользователю ВСЕГДА напоминать
+  скопировать continentgen.mixins.json из continent-mod-updated/
+
+════════════════════════════════════════════════════════════════
+  ОБНОВЛЕНО: 28.07.2026
+════════════════════════════════════════════════════════════════

@@ -1,0 +1,291 @@
+════════════════════════════════════════════════════════════════
+  ПОЛНАЯ ИСТОРИЯ РАЗРАБОТКИ — Continent Generator Mod
+  Для передачи в новый чат. 29.07.2026.
+════════════════════════════════════════════════════════════════
+
+## 1. КОНЦЕПЦИЯ ПРОЕКТА
+
+Fabric 1.20.1 мод для генерации мира из 7 PNG карт размером 3000×3000.
+Каждая карта определяет один аспект мира:
+- height.png — карта высот (grayscale 0-255)
+- temperature.png — климатические зоны (6 цветов = 6 зон)
+- humidity.png — влажность (grayscale)
+- erosion.png — эрозия (grayscale)
+- sea-ocean.png — маска океана (255=суша, <255=океан/глубина)
+- map_rivers.png — реки (RGBA: alpha>0 AND red<128 = вода)
+- map_lakes.png — озёра (тот же формат)
+
+Координатная система:
+  worldX/worldZ = координаты в мире Minecraft
+  pixelX = ((worldX + worldSize/2) / worldSize) * imageWidth
+  pixelZ = ((worldZ + worldSize/2) / worldSize) * imageHeight
+  worldSize — размер мира в блоках (default 150_000)
+  1 пиксель = worldSize/3000 блоков (при 150_000 → 50 блоков/пиксель)
+
+Тороидальное замыкание: координаты пикселей оборачиваются через modulo.
+
+## 2. ТЕХНОЛОГИЧЕСКИЙ СТЕК
+- Fabric Loom 1.3.10, Yarn 1.20.1+build.10, Fabric API 0.86.1+1.20.1
+- Java 17
+- Gradle (build.gradle, settings.gradle, gradle.properties)
+- Mixin: continentgen.mixins.json с "client": [] (пустой, без миксинов)
+- SDK: z-ai-web-dev-sdk (для backend)
+
+## 3. ХРОНОЛОГИЯ РАЗРАБОТКИ
+
+### Фаза 1: Инициализация проекта (~20.07.2026)
+- Создан базовый Fabric мод с ChunkGenerator и BiomeSource
+- Первая версия MapData.java с загрузкой PNG через ImageIO
+- Базовый ContinentChunkGenerator с nearest-neighbour сэмплированием
+- Константы: DEFAULT_WORLD_SIZE=150_000, SEA_LEVEL=63, MIN_Y=-64, MAX_Y=320, MAX_TERRAIN=200
+
+### Фаза 2: Первые ошибки компиляции (23-25.07.2026)
+
+**Ошибка #1**: BiomeAccess wrong import
+- Использован `net.minecraft.world.biome.BiomeAccess` — НЕ существует в Yarn 1.20.1
+- Исправлено: `net.minecraft.world.biome.source.BiomeAccess`
+
+**Ошибка #2**: carve() abstract method
+- Попытка удалить override carve() → ошибка "not abstract"
+- carve() — АБСТРАКТНЫЙ метод ChunkGenerator
+- Исправлено: оставлен override с пустым телом (no-op)
+
+**Ошибка #3**: DrawableHelper удалён
+- MC 1.20.1 не содержит DrawableHelper
+- Исправлено: использован DrawContext
+
+**Ошибка #4**: Методы getContinentalness и другие отсутствовали
+- ContinentChunkGenerator вызывал getContinentalness() в BiomeSource,
+  но MapData.java не содержал этот метод → рассинхрон
+- Исправлено: добавлены 6 методов в MapData: getContinentalness,
+  getTemperatureNorm, getHumidityNorm, getErosionNorm, getWeirdness, getDepthNorm
+
+**Ошибка #5**: Mixin LevelScreenProviderMixin not found
+- continentgen.mixins.json ссылался на "LevelScreenProviderMixin"
+- но папка mixin/ и файл были УДАЛЕНЫ (миксины вызывали краши)
+- Исправлено: обновлён mixins.json → "client": []
+- ПРИМЕЧАНИЕ: пользователь часто забывает скопировать этот файл!
+
+### Фаза 3: Проблема кругов-артефактов (26.07.2026)
+
+**Проблема**: На поверхности террейна видны круглые артефакты.
+- Круги пропорциональны размеру мира (300к → огромные, 75к → меньше)
+- Причина: SimplexNoise в ContinentChunkGenerator для erosion noise
+- SimplexNoise создаёт круговые паттерны при низких частотах
+- ЗАПРЕЩЕНО: SimplexNoise / любые шумовые оверлеи в terrain
+- Статус: ❌ ЧАСТИЧНО ИСПРАВЛЕНО — SimplexNoise удалён,
+  но circle-подобные артефакты могут оставаться из-за
+  nearest-neighbour сэмплирования PNG (отсутствие интерполяции)
+
+### Фаза 4: Проблема рек и озёр (27-28.07.2026)
+
+**Версия 1 ( mountains-follow-height ):**
+- Реки/озёра следовали высоте рельефа
+- surfaceY = terrainHeight - RIVER_CARVE_DEPTH
+- waterSurfaceY = terrainHeight - 1
+- Результат: в горах река на высоте 190, дно на 187, вода 1 блок.
+- Проблема: горы покрытые 1 блоком воды — невыглядит как река.
+- Статус: ❌ ОТКЛОНЕНО
+
+**Версия 2 (SEA_LEVEL approach):**
+- Вода рек/озёр на уровне SEA_LEVEL (63)
+- Любая местность ниже 63 заливалась водой
+- surfaceY = SEA_LEVEL - RIVER_DEPTH, waterSurfaceY = SEA_LEVEL
+- Берега: плавный переход через riverNess/lakeNess
+- Проблема: на горах (terrainHeight=191, SEA_LEVEL=63) перепад 128
+  блоков на ширину ~16 блоков берега
+- Пользователь: "перепад в 128 блоков высоты на 16 ширины берега"
+- Статус: ❌ ОТКЛОНЕНО — добавлено в ЗАПРЕЩЕНО
+
+**Предложенное решение (Terrain Carving — по аналогии с Tectonic):**
+- Русло реки = ПОНИЖЕНИЕ рельефа относительно окружающего террейна
+- waterLevel = terrainHeight - CARVE_DEPTH * riverNess
+- Вода следует за местностью: река в горах на Y=180, на равнине на Y=70
+- Перепад между берегом и водой = фиксированный (3-8 блоков), НЕ 128
+- Статус: ⏳ НЕ РЕАЛИЗОВАНО
+
+### Фаза 5: Анализ модов Tectonic и Lithostitched (28.07.2026)
+
+**Tectonic v3.0.17 (Fabric 1.20.1):**
+- НЕ использует fluid_level_floodedness/spread для поверхностных рек
+- Rivers = 2D ridge noise ВЫЧИТАЕТСЯ из террейна → долины
+- sloped_cheese = 4 * quarter_negative(depth + offset * factor)
+- quarter_negative(x): x>0→0 (воздух), x<0→-x/4 (твёрдый)
+- Точка пересечения = поверхность
+- 3 ключевых параметра: continentalness, erosion, ridges
+- Nested spline: continents → (erosion → (ridges → height_offset))
+- factor = 0.6 (равнины) до 5.6 (горные пики)
+- Подземные реки: Y=32-72, ridges<0.2, continentalness>-0.17, erosion<0.37
+- barrier=-1 в зонах подземных рек (вода течёт свободно)
+
+**Lithostitched v1.4.11 (Fabric 1.20.1):**
+- Библиотека-фреймворк (НЕ провайдер контента)
+- Modifier Pipeline: 6 фаз (BEFORE_ALL, MODIFY, ADD, REMOVE, REPLACE, AFTER_ALL)
+- WrapNoiseRouterModifier: патчит 15 слотов noise router
+- MergedDensityFunction: комбинирует original + wrapped
+- ChunkMapMixin перехватывает RandomState.create()
+
+**biomss.pdf — справочник биомов MC 1.20.1:**
+- Continentalness: < -0.45 → океан, -0.15..0.1 → берег, >> 0 → материк
+- Erosion: низкая → горы, высокая → равнины
+- Temperature: -1 → лёд, +1 → жара, +2 → пустыня/badlands
+- Реки: при ВСЕХ значениях continentalness (cut valleys)
+- Океаны: C < -0.45
+
+### Фаза 6: Обновление MapData.java (v5, 28.07.2026)
+
+MapData был обновлён до v5 с:
+- Билинейная интерполяция высоты (getHeight)
+- getRiverNess()/getLakeNess() — double [0..1] через bilinear
+- getOceanNess() — double [0..1] через bilinear
+- Билинейная интерполяция маски океана
+- Убраны circle-based isRiver/isLake
+- Константа DEFAULT_WORLD_SIZE = 150_000, SEA_LEVEL = 63
+
+### Фаза 7: Обновление ContinentChunkGenerator.java (v5, 28.07.2026)
+
+ChunkGenerator был обновлён до v5 с:
+- SimplexNoise УДАЛЁН
+- Реки/озёра: параболическое русло, вода на SEA_LEVEL
+- Плавные берега через riverNess/lakeNess
+- Океан: плавное смешивание через oceanNess
+- Beach cap: oceanNess 0.05-0.45 → clamp to SEA_LEVEL ± 2
+
+### Фаза 8: Потеря файлов и откат кода (29.07.2026)
+
+**Проблема**: Workspace потерял большое количество файлов:
+- Удалены: MANDATORY_PROJECT_DETAILS.txt, error_list.txt,
+  ВЕЩИ НЕОБХОСТИМЫЕ ДЛЯ ПРОВЕРКИ.txt, check_structure.py,
+  BiomeParameters.java, map_locator.py
+- Git lock: .git/index.lock — удалён вручную
+- Код откатился к СТАРОЙ версии (до v5):
+  * MapData.java: DEFAULT_WORLD_SIZE=300_000 (нужно 150_000),
+    SEA_LEVEL=62 (нужно 63), circle-based isRiver/isLake,
+    нет getRiverNess/getLakeNess/getContinentalness
+  * ContinentChunkGenerator.java: SimplexNoise (запрещён!),
+    реки snap to SEA_LEVEL (запрещено!), нет параболического русла
+  * continentgen.mixins.json: ссылается на LevelScreenProviderMixin
+    (файл удалён!)
+  * ContinentCustomizeScreen.java: DEFAULT_WORLD_SIZE=300_000
+
+## 4. ТЕКУЩЕЕ СОСТОЯНИЕ (29.07.2026)
+
+### ⚠️ КРИТИЧЕСКИЕ ПРОБЛЕМЫ (код откатился!):
+
+1. **MapData.java** — старая версия:
+   - DEFAULT_WORLD_SIZE = 300_000 ❌ (нужно 150_000)
+   - SEA_LEVEL = 62 ❌ (нужно 63)
+   - isRiver/isLake используют circle-based подход ❌
+   - Нет методов: getRiverNess, getLakeNess, getContinentalness,
+     getTemperatureNorm, getHumidityNorm, getErosionNorm,
+     getWeirdness, getDepthNorm ❌
+
+2. **ContinentChunkGenerator.java** — старая версия:
+   - Содержит SimplexNoise класс и поля ❌ (запрещено — круги)
+   - sampleErosionNoise() ❌ (запрещено)
+   - Реки snap to SEA_LEVEL ❌ (запрещено)
+   - Нет параболического русла ❌
+   - Нет coast blending через oceanNess (ЕСТЬ, но частично)
+
+3. **ContinentCustomizeScreen.java** — старая версия:
+   - DEFAULT_WORLD_SIZE = 300_000 ❌ (нужно 150_000)
+
+4. **continentgen.mixins.json** — ссылается на удалённый миксин:
+   - "client": ["LevelScreenProviderMixin"] ❌
+   - Нужно: "client": []
+
+5. **Отсутствуют файлы**:
+   - BiomeParameters.java ❌
+   - check_structure.py ❌
+   - error_list.txt ❌
+   - ВЕЩИ НЕОБХОСТИМЫЕ ДЛЯ ПРОВЕРКИ.txt ❌
+   - map_locator.py ❌
+
+### ✅ РАБОТАЮЩИЕ ФАЙЛЫ:
+- ContinentBiomeSource.java — корректная версия (biome matrix, quart coords)
+- ClimateZone.java — 6 климатических зон
+- MapLoader.java — загрузка карт
+- BuiltinRegistriesAccess.java — доступ к регистрам
+- WorldBorderHandler.java — граница мира
+- ContinentGenMod.java — точка входа мода
+- ContinentGenModClient.java — клиентская точка входа
+- ContinentLevelScreenProvider.java — провайдер экрана
+- Все resource JSON файлы
+
+## 5. ЗАПРЕЩЕННЫЕ ПАТТЕРНЫ (проверять при каждом изменении)
+1. ❌ Вода рек/озёр на фиксированном SEA_LEVEL
+2. ❌ Файлы в src/main/java/com/continentgen/mixin/
+3. ❌ Импорт net.minecraft.world.biome.BiomeAccess
+4. ❌ SimplexNoise / шумовые оверлеи в terrain
+5. ❌ Удаление override carve()
+6. ❌ DrawableHelper
+7. ❌ DEFAULT_WORLD_SIZE = 300_000
+
+## 6. ПЕРВЫЕ ДЕЙСТВИЯ В НОВОМ ЧАТЕ
+
+1. Восстановить MapData.java до v5 (с билинейной интерполяцией,
+   getRiverNess/getLakeNess, правильными константами)
+2. Восстановить ContinentChunkGenerator.java до v5 (без SimplexNoise,
+   с terrain carving для рек вместо SEA_LEVEL)
+3. Исправить continentgen.mixins.json → "client": []
+4. Исправить ContinentCustomizeScreen.java → DEFAULT_WORLD_SIZE = 150_000
+5. Восстановить все отсутствующие файлы
+6. Проверить: python3 check_structure.py → 0 ошибок
+7. Напомнить пользователю скопировать continentgen.mixins.json!
+
+## 7. ПЕНДИНГ ЗАДАЧ (не реализовано)
+1. ✅ Билинейная интерполяция высоты — реализовано в старой v5, нужно вернуть
+2. ✅ Билинейная интерполяция океана (oceanNess) — реализовано, нужно вернуть
+3. ❌ Terrain Carving для рек/озёр (вместо SEA_LEVEL) — НЕ РЕАЛИЗОВАНО
+4. ❌ Исправление кругов-артефактов — SimplexNoise удалён,
+   но нужна проверка остались ли артефакты
+5. ❌ BiomeParameters.java с таблицей биомов — УТЕРЯН
+6. ❌ map_locator.py — УТЕРЯН
+7. ❌ Пересчёт humidity/erosion карт (BLOCKED — нет скриптов)
+8. ❌ Обновлённый подход к выбору биомов (BLOCKED — нет файла)
+
+## 8. АНАЛИЗ: ПРЕДЛАГАЕМОЕ РЕШЕНИЕ ДЛЯ РЕК/ОЗЁР
+
+Подход "Terrain Carving" (по аналогии с Tectonic):
+
+Для каждой колонки:
+  terrainHeight = getHeight(x, z)                    // из height.png
+  riverNess     = getRiverNess(x, z)                 // 0..1, билинейная
+  lakeNess      = getLakeNess(x, z)                   // 0..1, билинейная
+
+  // Локальная "водная поверхность" — ниже окружающей местности
+  waterLevel = terrainHeight - CARVE_DEPTH * max(riverNess, lakeNess)
+
+  // Дно русла ещё ниже (параболическое сечение)
+  riverBed = waterLevel - RIVER_BOTTOM_DEPTH * riverNess
+  lakeBed  = waterLevel - LAKE_BOTTOM_DEPTH * lakeNess
+
+  surfaceY = max(riverBed, lakeBed, terrainHeight - bankBlend)
+  waterSurfaceY = waterLevel
+
+Ключевое отличие от SEA_LEVEL подхода:
+- Вода следует за местностью (река в горах на Y=180, на равнине Y=70)
+- Перепад берег-вода = фиксированный (3-8 блоков)
+- НЕТ перепада 128 блоков
+
+Для берегов:
+- bankBlend: плавное понижение в зоне riverNess/lakeNess от 0.2 до 0.5
+- Максимальный перепад контролируется через bilinear интерполяцию
+
+## 9. ПРИЛОЖЕНИЕ: СТРУКТУРА continentgen.mixins.json
+
+```json
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.continentgen.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
+```
+
+ВАЖНО: "client" ДОЛЖЕН быть пустым массивом [].
+Если там есть "LevelScreenProviderMixin" → краш при запуске!

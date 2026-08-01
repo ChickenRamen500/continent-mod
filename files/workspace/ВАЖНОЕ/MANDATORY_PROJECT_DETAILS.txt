@@ -1,0 +1,87 @@
+════════════════════════════════════════════════════════════════
+  MANDATORY_PROJECT_DETAILS — Continent Generator Mod
+  НЕ ОБНОВЛЯТЬ без явной команды пользователя.
+  Используется как замена части блока "НАПОМИНАНИЕ" в промптах.
+════════════════════════════════════════════════════════════════
+
+## СТЕК
+- Fabric Loom 1.3.10, Yarn 1.20.1+build.10, Fabric API 0.86.1+1.20.1
+- Java 17, Minecraft 1.20.1
+- Папка апдейтов: continent-mod-updated/ (зеркальная структура src/)
+- Рабочая копия: continent-mod/ (на машине пользователя, F:\continent-mod\)
+
+## 7 PNG КАРТ (3000×3000, кладутся в mods/continent-mod-maps/)
+height.png, temperature.png, humidity.png, erosion.png,
+sea-ocean.png (RGBA, НЕ Grayscale!), map_rivers.png, map_lakes.png
+
+## ПАПКА КОНЦЕПЦИИ
+continent-mod-updated/ — staging (зеркальная структура).
+check_structure.py, map_locator.py, error_list.txt,
+MANDATORY_PROJECT_DETAILS.txt — в КОРНЕ continent-mod-updated/.
+
+## ПАПКА ВАЖНОЕ (КОРЕНЬ WORKSPACE)
+- Расположение: корень workspace (рядом с continent-mod-updated/, upload/)
+- СОДЕРЖИТ: ТЕХНИЧЕСКОЕ_ОПИСАНИЕ_ПРОЕКТА.txt, MANDATORY_PROJECT_DETAILS.txt,
+  error_list.txt, ВЕЩИ НЕОБХОДИМЫЕ ДЛЯ ПРОВЕРКИ.txt
+- ⛔️ АБСОЛЮТНО ЗАПРЕЩЕНО: удалять, переименовывать или изменять
+  ЛЮБЫЕ файлы из папки ВАЖНОЕ без ПРЯМОГО УКАЗАНИЯ пользователя.
+  Исключение: пользователь явно приказал обновить конкретный файл.
+
+## ЗАПРЕЩЕНО
+1. Создавать файлы в src/main/java/com/continentgen/mixin/
+   → Mixin вызывал краши, папка и файлы УДАЛЕНЫ.
+   → continentgen.mixins.json: "client": [] (пустой)
+2. Импорт net.minecraft.world.biome.BiomeAccess
+   → НЕ существует в Yarn 1.20.1.
+   → Правильно: net.minecraft.world.biome.source.BiomeAccess
+3. SimplexNoise / шумовые оверлеи в terrain
+   → Вызывают круги-артефакты на поверхности.
+4. Удалять override carve() — метод АБСТРАКТНЫЙ в ChunkGenerator.
+   → ВСЕГДА override с пустым телом (no-op).
+5. DrawableHelper → УДАЛЁН в MC 1.20.1. Использовать DrawContext.
+6. DEFAULT_WORLD_SIZE = 300_000 → ВСЕГДА 150_000.
+
+## ОБЯЗАТЕЛЬНО
+1. Комментарии в коде на русском.
+2. При ошибке: сначала error_list.txt → обновить → потом исправлять.
+3. После изменений: python3 check_structure.py — 0 ошибок.
+4. Все апдейты ТОЛЬКО в continent-mod-updated/.
+5. Проверять что методы вызываемые в ChunkGenerator/BiomeSource
+   существуют в MapData.java (рассинхрон = ошибки компиляции).
+6. Константы (DEFAULT_WORLD_SIZE, SEA_LEVEL) совпадают во ВСЕХ файлах.
+7. BiomeSource.getBiome получает quart-координаты → сдвиг x<<2, z<<2.
+
+## КЛЮЧЕВЫЕ КОНСТАНТЫ
+- DEFAULT_WORLD_SIZE = 150_000
+- SEA_LEVEL = 63
+- MIN_Y = -64, MAX_Y = 320
+- OCEAN_THRESHOLD = 255 (< 255 = океан в sea-ocean.png)
+- WATER_RED_THRESHOLD = 128 (red < 128 AND alpha > 0 = вода в реках/озёрах)
+- 1 пиксель = worldSize / 3000 блоков
+
+## СТРУКТУРА ФАЙЛОВ (обязательные)
+Java:
+  src/main/java/com/continentgen/ContinentGenMod.java
+  src/main/java/com/continentgen/client/ContinentCustomizeScreen.java
+  src/main/java/com/continentgen/client/ContinentLevelScreenProvider.java
+  src/main/java/com/continentgen/client/ContinentGenModClient.java
+  src/main/java/com/continentgen/map/MapData.java
+  src/main/java/com/continentgen/map/BiomeParameters.java
+  src/main/java/com/continentgen/map/ClimateZone.java
+  src/main/java/com/continentgen/map/MapLoader.java
+  src/main/java/com/continentgen/world/ContinentChunkGenerator.java
+  src/main/java/com/continentgen/world/ContinentBiomeSource.java
+  src/main/java/com/continentgen/world/BuiltinRegistriesAccess.java
+  src/main/java/com/continentgen/world/WorldBorderHandler.java
+Resources:
+  src/main/resources/continentgen.mixins.json  (client: [])
+  src/main/resources/fabric.mod.json
+  src/main/resources/data/continentgen/worldgen/world_preset/continent.json
+  src/main/resources/data/minecraft/tags/worldgen/world_preset/normal.json
+  src/main/resources/data/minecraft/worldgen/world_preset/continent.json
+  src/main/resources/assets/continentgen/lang/en_us.json
+  src/main/resources/assets/continentgen/lang/ru_ru.json
+Корень:
+  check_structure.py, map_locator.py, error_list.txt,
+  MANDATORY_PROJECT_DETAILS.txt, ВЕЩИ НЕОБХОДИМЫЕ ДЛЯ ПРОВЕРКИ.txt
+  build.gradle, settings.gradle, gradle.properties

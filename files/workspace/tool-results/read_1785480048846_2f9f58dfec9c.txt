@@ -1,0 +1,815 @@
+     1→"""
+     2→map_locator.py — Показывает позицию игрока на КАРТЕ БИОМОВ (создаётся автоматически).
+     3→
+     4→Использование:
+     5→    python map_locator.py
+     6→
+     7→При запуске скрипт:
+     8→    1. Загружает 7 PNG карт (height, humidity, temperature, sea-ocean,
+     9→       map_rivers, map_lakes) из текущей директории (или указанной --maps-dir).
+    10→       Имена файлов СООТВЕТСТВУЮТ Java-коду мода:
+    11→         height.png, temperature.png, humidity.png, erosion.png,
+    12→         map_sea-ocean.png, map_rivers.png, map_lakes.png
+    13→    v4 (July 2026): океан определяется МАСКОЙ map_sea-ocean.png (не по высоте),
+    14→    биомы подбираются по параметрам T/H/C/E/W (nearest-point matching).
+    15→    2. Генерирует карту биомов biome_map.png (алгоритм Qwen).
+    16→    3. Сохраняет оригинал для последующего затирания старого маркера.
+    17→    4. Открывает интерактивный режим: вводите "X Z", скрипт:
+    18→       - Переводит координаты в пиксели
+    19→       - Выводит в консоль ПОДРОБНУЮ информацию:
+    20→           * высота (gray + Y)
+    21→           * влажность (значение + сухо/влажно)
+    22→           * находимся ли мы в воде (океан/глубокий океан/река/озеро)
+    23→           * климат (зона + температура + RGB + расстояние)
+    24→           * предполагаемый биом
+    25→           * эрозия
+    26→           * координаты пикселя и чанка
+    27→       - Рисует маркер на карте biome_map.png
+    28→       - Старый маркер затирается данными из оригинала
+    29→
+    30→Параметры:
+    31→    --maps-dir DIR    Папка с PNG картами (по умолчанию авто-поиск)
+    32→    --output PATH     Файл для вывода карты с маркером (по умолчанию map_located.png)
+    33→    --regenerate      Перегенерировать карту биомов при каждом запуске
+    34→    --biome-map PATH  Файл для сохранения карты биомов (по умолчанию biome_map.png)
+    35→    --no-marker        Не рисовать маркер, только вывести информацию
+    36→
+    37→Требования:
+    38→    pip install Pillow numpy
+    39→"""
+    40→
+    41→import sys
+    42→import os
+    43→import argparse
+    44→import numpy as np
+    45→from PIL import Image, ImageDraw, ImageFont
+    46→
+    47→# ========================================================
+    48→# КОНСТАНТЫ МИРА (совпадают с Java MapData.java)
+    49→# ========================================================
+    50→WORLD_SIZE = 150_000        # Default world size (1px = 50 blocks at 3000px map)
+    51→HALF_WORLD = 75_000
+    52→SEA_LEVEL = 63              # v3: matches MapData.SEA_LEVEL (was 62)
+    53→MIN_Y = -64
+    54→MAX_Y = 320
+    55→
+    56→# ─── Диапазон высот рельефа (v3, July 2026 — совпадает с MapData.java) ───
+    57→# height.png — карта высот ВСЕГО мира:
+    58→#   gray   0 (чёрный)  = самая глубокая точка океана (Марианская впадина)
+    59→#   gray 255 (белый)   = самая высокая точка гор (Гималаи)
+    60→# Кусочно-линейная формула:
+    61→#   gray 0..72   → Y  -30..63    (океан, 93 блока диапазона)
+    62→#   gray 72..255 → Y   63..200   (суша, 137 блоков диапазона)
+    63→# Порог 72 эмпирически выведен из height.png: 90% совпадения с sea-ocean.png.
+    64→MIN_OCEAN = -30             # самая глубокая точка океана
+    65→MAX_TERRAIN = 200           # самая высокая точка суши
+    66→SEA_LEVEL_GRAY = 72         # gray, при котором Y пересекает уровень моря
+    67→DEEP_OCEAN_Y = 25           # Y ниже этого = глубокий океан
+    68→
+    69→# Устаревшие пороги (только для F3-отладки / совместимости со старым sea-ocean.png)
+    70→OCEAN_THRESHOLD = 255       # <255 = океан (sea-ocean.png)
+    71→DEEP_OCEAN_THRESHOLD = 80   # <=80 = глубокий океан (sea-ocean.png)
+    72→WATER_RED_THRESHOLD = 128   # red<128 AND alpha>0 = вода (реки/озёра)
+    73→OCEAN_MAX_DEPTH = 60
+    74→
+    75→# ========================================================
+    76→# ЦВЕТА БИОМОВ (как в скрипте Qwen)
+    77→# ========================================================
+    78→BIOME_COLORS = {
+    79→    'deep_ocean':     (0, 0, 80),
+    80→    'ocean':          (0, 0, 180),
+    81→    'river':          (0, 150, 255),
+    82→    'lake':           (50, 200, 200),
+    83→    'snowy_plains':   (230, 230, 230),
+    84→    'snowy_slopes':   (190, 200, 210),
+    85→    'taiga':          (10, 80, 80),
+    86→    'snowy_taiga':    (170, 190, 180),
+    87→    'plains':         (140, 180, 90),
+    88→    'forest':         (60, 130, 50),
+    89→    'savanna':        (180, 170, 70),
+    90→    'jungle':         (70, 120, 10),
+    91→    'badlands':       (200, 70, 30),
+    92→    'mangrove_swamp': (50, 110, 60),
+    93→    'desert':         (240, 150, 20),
+    94→    'bamboo_jungle':  (80, 150, 30),
+    95→    'frozen_ocean':   (160, 200, 255),  # дополнительный
+    96→    'swamp':          (100, 120, 60),   # дополнительный
+    97→}
+    98→
+    99→# Климатические зоны (RGB) — совпадают с ClimateZone.java
+   100→CLIMATE_ZONES = {
+   101→    'ARCTIC':         np.array([0x7F, 0x8B, 0x99]),
+   102→    'SUBARCTIC':      np.array([0x88, 0xB4, 0xD7]),
+   103→    'TEMPERATE':      np.array([0x6C, 0xC8, 0x89]),
+   104→    'TROPICAL':       np.array([0xF7, 0xFB, 0x83]),
+   105→    'SUBEQUATORIAL':  np.array([0xE7, 0xBD, 0x83]),
+   106→    'EQUATORIAL':     np.array([0xCE, 0x82, 0x84]),
+   107→}
+   108→
+   109→# Температура для каждого климата — совпадает с ClimateZone.java
+   110→CLIMATE_TEMPS = {
+   111→    'ARCTIC': 0.05, 'SUBARCTIC': 0.25, 'TEMPERATE': 0.50,
+   112→    'TROPICAL': 0.75, 'SUBEQUATORIAL': 0.90, 'EQUATORIAL': 1.00,
+   113→}
+   114→
+   115→# ========================================================
+   116→# НАСТРОЙКИ МАРКЕРА
+   117→# ========================================================
+   118→MARKER_SIZE = 14
+   119→CROSSHAIR_SIZE = 22
+   120→MARKER_COLOR_OUTER = (255, 0, 255)   # Magenta
+   121→MARKER_COLOR_INNER = (255, 255, 255)  # Белый
+   122→MARKER_TEXT = "P"
+   123→
+   124→# Имена файлов — СОВПАДАЮТ с Java MapData.java / MapLoader.java
+   125→DEFAULT_MAP_FILES = {
+   126→    'height':     'height.png',
+   127→    'humidity':   'humidity.png',
+   128→    'temperature':'temperature.png',
+   129→    'erosion':    'erosion.png',
+   130→    'sea_ocean':  'map_sea-ocean.png',  # v4: LA маска (alpha>0 = океан)
+   131→    'rivers':     'map_rivers.png',   # <-- было rivers.png, исправлено!
+   132→    'lakes':      'map_lakes.png',    # <-- было lakes.png, исправлено!
+   133→}
+   134→
+   135→
+   136→def find_maps_dir(maps_dir=None):
+   137→    """Найти папку с PNG картами."""
+   138→    candidates = []
+   139→    if maps_dir:
+   140→        candidates.append(maps_dir)
+   141→    candidates.append('.')
+   142→    candidates.append(os.path.dirname(os.path.abspath(__file__)) or '.')
+   143→
+   144→    # Стандартные пути Minecraft
+   145→    if sys.platform == "win32":
+   146→        appdata = os.environ.get("APPDATA", "")
+   147→        if appdata:
+   148→            candidates.append(os.path.join(appdata, ".tlauncher", "minecraft"))
+   149→            candidates.append(os.path.join(appdata, ".minecraft"))
+   150→        localappdata = os.environ.get("LOCALAPPDATA", "")
+   151→        if localappdata:
+   152→            candidates.append(os.path.join(localappdata, ".minecraft"))
+   153→    else:
+   154→        home = os.path.expanduser("~")
+   155→        candidates.append(home)
+   156→
+   157→    for d in candidates:
+   158→        if os.path.isdir(d) and os.path.exists(os.path.join(d, DEFAULT_MAP_FILES['height'])):
+   159→            return d
+   160→    return None
+   161→
+   162→
+   163→def load_maps(maps_dir):
+   164→    """Загрузить все 7 PNG карт. Возвращает словарь numpy массивов."""
+   165→    maps = {}
+   166→    print(f"[*] Загрузка карт из: {maps_dir}")
+   167→    print(f"    Ожидаемые файлы: {list(DEFAULT_MAP_FILES.values())}")
+   168→
+   169→    # Сначала покажем все файлы в директории
+   170→    try:
+   171→        all_files = sorted(os.listdir(maps_dir))
+   172→        png_files = [f for f in all_files if f.lower().endswith('.png')]
+   173→        print(f"    PNG файлы в директории ({len(png_files)}):")
+   174→        for f in png_files:
+   175→            size = os.path.getsize(os.path.join(maps_dir, f))
+   176→            print(f"      {f} ({size} bytes)")
+   177→    except Exception as e:
+   178→        print(f"    [!] Не удалось перечислить файлы: {e}")
+   179→
+   180→    for key, fname in DEFAULT_MAP_FILES.items():
+   181→        path = os.path.join(maps_dir, fname)
+   182→        if not os.path.exists(path):
+   183→            print(f"    [!] НЕ НАЙДЕН: {fname}")
+   184→            return None
+   185→        try:
+   186→            if key == 'temperature':
+   187→                img = Image.open(path).convert('RGB')
+   188→                maps[key] = np.array(img)
+   189→            elif key in ('rivers', 'lakes'):
+   190→                # rivers/lakes — RGBA, используем alpha channel
+   191→                img = Image.open(path).convert('RGBA')
+   192→                maps[key] = np.array(img)
+   193→            elif key == 'sea_ocean':
+   194→                # v4: sea_ocean — LA или RGBA маска (alpha>0 = океан)
+   195→                img = Image.open(path).convert('RGBA')
+   196→                maps[key] = np.array(img)
+   197→            else:
+   198→                img = Image.open(path).convert('L')
+   199→                maps[key] = np.array(img)
+   200→            print(f"    OK {fname}: shape={maps[key].shape} dtype={maps[key].dtype}")
+   201→        except Exception as e:
+   202→            print(f"    [!] Ошибка загрузки {fname}: {e}")
+   203→            return None
+   204→
+   205→    return maps
+   206→
+   207→
+   208→def detect_climate(rgb):
+   209→    """Найти ближайшую климатическую зону к RGB цвету."""
+   210→    best = None
+   211→    best_dist = float('inf')
+   212→    for name, color in CLIMATE_ZONES.items():
+   213→        d = np.sqrt(np.sum((np.array(rgb).astype(int) - color) ** 2))
+   214→        if d < best_dist:
+   215→            best_dist = d
+   216→            best = name
+   217→    return best, best_dist
+   218→
+   219→
+   220→def generate_biome_map(maps):
+   221→    """Сгенерировать карту биомов (RGB numpy array).
+   222→
+   223→    v4 (July 2026):
+   224→      - Океан определяется МАСКОЙ map_sea-ocean.png (alpha>0 = океан).
+   225→      - Глубокий океан: ocean mask И height gray < 42 (Y < 25).
+   226→      - Биомы суши: nearest-point matching по параметрам T/H/C/E/W
+   227→        (совпадает с Java BiomeParameters.java).
+   228→    """
+   229→    print("[*] Генерация карты биомов (v4 — mask-driven ocean + multi-noise biomes)...")
+   230→
+   231→    height_img = maps['height']
+   232→    humidity_img = maps['humidity']
+   233→    erosion_img = maps['erosion']
+   234→    temp_img = maps['temperature']
+   235→    lakes_data = maps['lakes']
+   236→    rivers_data = maps['rivers']
+   237→    sea_ocean_data = maps['sea_ocean']
+   238→
+   239→    H, W = height_img.shape
+   240→    biome_map = np.zeros((H, W, 3), dtype=np.uint8)
+   241→
+   242→    # ─── Маски воды (v4: ocean from mask) ───
+   243→    # Ocean mask: alpha > 0 AND luminance < 128 (LA format)
+   244→    ocean_mask = (sea_ocean_data[:, :, 3] > 0) & (sea_ocean_data[:, :, 0] < WATER_RED_THRESHOLD)
+   245→    # Deep ocean: ocean AND height < deep_ocean_gray (Y < 25)
+   246→    deep_ocean_gray = int(round((DEEP_OCEAN_Y - MIN_OCEAN) * SEA_LEVEL_GRAY / (SEA_LEVEL - MIN_OCEAN)))
+   247→    deep_ocean_mask = ocean_mask & (height_img < deep_ocean_gray)
+   248→    shallow_ocean_mask = ocean_mask & ~deep_ocean_mask
+   249→
+   250→    # rivers/lakes: alpha > 0 AND red < 128
+   251→    lakes_mask = (lakes_data[:, :, 3] > 0) & (lakes_data[:, :, 0] < WATER_RED_THRESHOLD)
+   252→    rivers_mask = (rivers_data[:, :, 3] > 0) & (rivers_data[:, :, 0] < WATER_RED_THRESHOLD)
+   253→
+   254→    water_mask = ocean_mask | lakes_mask | rivers_mask
+   255→    land_mask = ~water_mask
+   256→
+   257→    # Заполняем воду
+   258→    biome_map[deep_ocean_mask] = BIOME_COLORS['deep_ocean']
+   259→    biome_map[shallow_ocean_mask] = BIOME_COLORS['ocean']
+   260→    biome_map[lakes_mask] = BIOME_COLORS['lake']
+   261→    biome_map[rivers_mask] = BIOME_COLORS['river']
+   262→
+   263→    # ─── Параметры суши для biome matching ───
+   264→    # Temperature normalized: ClimateZone.temp (0.05..1.0) → (-1.0, 1.0)
+   265→    def get_climate(temp_rgb):
+   266→        best = None
+   267→        best_dist = float('inf')
+   268→        for name, color in CLIMATE_ZONES.items():
+   269→            d = np.sqrt(np.sum((np.array(temp_rgb).astype(int) - color) ** 2))
+   270→            if d < best_dist:
+   271→                best_dist = d
+   272→                best = name
+   273→        return best
+   274→
+   275→    temp_norm_grid = np.zeros((H, W), dtype=np.float32)
+   276→    climate_grid = np.empty((H, W), dtype='U20')
+   277→    for z in range(H):
+   278→        for x in range(W):
+   279→            climate = get_climate(temp_img[z, x])
+   280→            climate_grid[z, x] = climate
+   281→            temp_norm_grid[z, x] = (CLIMATE_TEMPS[climate] - 0.5) * 2.0
+   282→
+   283→    # Humidity normalized: 0..255 → (-1.0, 1.0)
+   284→    hum_norm_grid = (humidity_img.astype(np.float32) / 255.0) * 2.0 - 1.0
+   285→
+   286→    # Erosion normalized: 0..255 → (-1.0, 1.0)
+   287→    ero_norm_grid = (erosion_img.astype(np.float32) / 255.0) * 2.0 - 1.0
+   288→
+   289→    # Continentalness: from ocean mask proximity
+   290→    # Ocean pixel → C ≈ -1.0, Land far from coast → C ≈ 0.6
+   291→    from scipy.ndimage import gaussian_filter
+   292→    ocean_float = ocean_mask.astype(np.float32)
+   293→    ocean_smooth = gaussian_filter(ocean_float, sigma=2)
+   294→    c_grid = 0.6 - ocean_smooth * 1.8
+   295→    c_grid = np.clip(c_grid, -1.2, 1.0)
+   296→
+   297→    # ─── Biome parameter table (matches BiomeParameters.java) ───
+   298→    BIOME_PARAMS = [
+   299→        # (name, T, H, C, E, W)
+   300→        ('plains',            0.3,  0.0,  0.3,  0.5,  0.0),
+   301→        ('sunflower_plains',  0.3,  0.0,  0.3,  0.5,  1.0),
+   302→        ('forest',           0.4,  0.6,  0.3,  0.0,  0.0),
+   303→        ('flower_forest',    0.4,  0.6,  0.3,  0.0,  1.0),
+   304→        ('birch_forest',      0.6,  0.6,  0.3,  0.0,  0.0),
+   305→        ('dark_forest',       0.7,  0.8,  0.3,  0.0,  0.0),
+   306→        ('taiga',           -0.2,  0.3,  0.3,  0.0,  0.0),
+   307→        ('snowy_taiga',      -0.3,  0.4,  0.3,  0.3,  0.0),
+   308→        ('old_growth_spruce_taiga', -0.3, 0.8, 0.3, 0.3, 0.0),
+   309→        ('old_growth_pine_taiga',   -0.3, 0.8, 0.3, 0.3, 0.0),
+   310→        ('snowy_plains',     -0.5,  0.0,  0.3,  0.5,  0.0),
+   311→        ('ice_spikes',       -0.5,  0.0,  0.3,  0.5,  1.0),
+   312→        ('grove',           -0.2,  0.8,  0.3, -0.3,  0.0),
+   313→        ('meadow',            0.5,  0.8,  0.3,  0.0,  0.0),
+   314→        ('jagged_peaks',     -0.7,  0.9,  0.6, -1.0,  0.0),
+   315→        ('frozen_peaks',     -0.7,  0.9,  0.6, -1.0,  0.0),
+   316→        ('stony_peaks',       1.0,  0.3,  0.6, -1.0,  0.0),
+   317→        ('snowy_slopes',     -0.3,  0.8,  0.3, -0.5,  0.0),
+   318→        ('savanna',          0.8, -0.3,  0.3,  0.3,  0.0),
+   319→        ('savanna_plateau',  0.8, -0.3,  0.6,  0.5,  0.0),
+   320→        ('windswept_savanna', 1.0, -0.3,  0.3, -0.5,  0.0),
+   321→        ('desert',            1.0, -0.5,  0.3,  0.8,  0.0),
+   322→        ('badlands',          1.0, -0.5,  0.6, -0.5,  0.0),
+   323→        ('wooded_badlands',    1.0, -0.3,  0.6, -0.5,  0.0),
+   324→        ('jungle',            0.9,  0.9,  0.3,  0.0,  0.0),
+   325→        ('sparse_jungle',      0.9,  0.9,  0.3,  0.0,  1.0),
+   326→        ('bamboo_jungle',     0.9,  0.9,  0.3,  0.0,  0.5),
+   327→        ('mangrove_swamp',    0.8,  0.9, -0.1,  0.0,  0.5),
+   328→        ('windswept_hills',   0.2,  0.0,  0.3, -0.5,  0.0),
+   329→        ('windswept_forest',  0.2,  0.3,  0.3, -0.5,  0.0),
+   330→        ('swamp',             0.8,  0.9, -0.1,  0.0,  0.0),
+   331→        ('cherry_grove',      0.5,  0.8,  0.3,  0.0,  1.0),
+   332→    ]
+   333→    # Pre-convert to numpy arrays for vectorized distance computation
+   334→    bp_t  = np.array([p[1] for p in BIOME_PARAMS], dtype=np.float32)
+   335→    bp_h  = np.array([p[2] for p in BIOME_PARAMS], dtype=np.float32)
+   336→    bp_c  = np.array([p[3] for p in BIOME_PARAMS], dtype=np.float32)
+   337→    bp_e  = np.array([p[4] for p in BIOME_PARAMS], dtype=np.float32)
+   338→    bp_w  = np.array([p[5] for p in BIOME_PARAMS], dtype=np.float32)
+   339→    bp_names = [p[0] for p in BIOME_PARAMS]
+   340→
+   341→    # Vectorized nearest-point matching for all land pixels
+   342→    print("    Calculating biome parameters (vectorized)...")
+   343→    land_y, land_x = np.where(land_mask)
+   344→    if len(land_y) > 0:
+   345→        t_vals = temp_norm_grid[land_y, land_x]  # (N,)
+   346→        h_vals = hum_norm_grid[land_y, land_x]
+   347→        c_vals = c_grid[land_y, land_x]
+   348→        e_vals = ero_norm_grid[land_y, land_x]
+   349→        # w = 0.0 for all
+   350→        # Distance: (N, num_biomes)
+   351→        dist = ((t_vals[:, None] - bp_t[None, :]) ** 2 +
+   352→               (h_vals[:, None] - bp_h[None, :]) ** 2 +
+   353→               (c_vals[:, None] - bp_c[None, :]) ** 2 +
+   354→               (e_vals[:, None] - bp_e[None, :]) ** 2 +
+   355→               bp_w[None, :] ** 2)
+   356→        best_idx = np.argmin(dist, axis=1)
+   357→        best_biomes = [bp_names[i] for i in best_idx]
+   358→
+   359→        for i in range(len(land_y)):
+   360→            biome_name = best_biomes[i]
+   361→            if biome_name in BIOME_COLORS:
+   362→                biome_map[land_y[i], land_x[i]] = BIOME_COLORS[biome_name]
+   363→            else:
+   364→                biome_map[land_y[i], land_x[i]] = BIOME_COLORS['plains']
+   365→
+   366→    # Статистика
+   367→    total = H * W
+   368→    print(f"    Карта биомов: {W}x{H}")
+   369→    print(f"    Статистика покрытия:")
+   370→    print(f"      deep_ocean:  {deep_ocean_mask.sum():8d} ({100.0*deep_ocean_mask.sum()/total:.1f}%)")
+   371→    print(f"      ocean:       {shallow_ocean_mask.sum():8d} ({100.0*shallow_ocean_mask.sum()/total:.1f}%)")
+   372→    print(f"      river:       {rivers_mask.sum():8d} ({100.0*rivers_mask.sum()/total:.1f}%)")
+   373→    print(f"      lake:        {lakes_mask.sum():8d} ({100.0*lakes_mask.sum()/total:.1f}%)")
+   374→    print(f"      land:        {land_mask.sum():8d} ({100.0*land_mask.sum()/total:.1f}%)")
+   375→    return biome_map
+   376→
+   377→
+   378→def world_to_pixel(worldX, worldZ, imgW, imgH):
+   379→    """Перевести мировые координаты в пиксельные."""
+   380→    px = int((worldX + HALF_WORLD) / WORLD_SIZE * imgW)
+   381→    pz = int((worldZ + HALF_WORLD) / WORLD_SIZE * imgH)
+   382→    px = max(0, min(imgW - 1, px))
+   383→    pz = max(0, min(imgH - 1, pz))
+   384→    return px, pz
+   385→
+   386→
+   387→def gray_to_height(gray):
+   388→    """Преобразовать gray (0..255) в Y координату.
+   389→
+   390→    Кусочно-линейная формула (v3, совпадает с MapData.grayToHeight):
+   391→      gray 0..72   → Y -30..63   (океан)
+   392→      gray 72..255 → Y 63..200   (суша)
+   393→    """
+   394→    if gray <= SEA_LEVEL_GRAY:
+   395→        t = gray / SEA_LEVEL_GRAY
+   396→        return MIN_OCEAN + int(round(t * (SEA_LEVEL - MIN_OCEAN)))
+   397→    else:
+   398→        t = (gray - SEA_LEVEL_GRAY) / (255 - SEA_LEVEL_GRAY)
+   399→        return SEA_LEVEL + int(round(t * (MAX_TERRAIN - SEA_LEVEL)))
+   400→
+   401→
+   402→def get_pixel_info(maps, biome_map, px, pz):
+   403→    """Получить подробную информацию о пикселе."""
+   404→    info = {}
+   405→
+   406→    # Height (v3): gray 0 (Марианская) → Y -30, gray 72 → Y 63 (море), gray 255 → Y 200
+   407→    gray = int(maps['height'][pz, px])
+   408→    info['height_gray'] = gray
+   409→    info['height_y'] = gray_to_height(gray)
+   410→    # Legacy height-based ocean (for comparison only)
+   411→    info['is_ocean_by_height'] = info['height_y'] < SEA_LEVEL
+   412→    info['is_deep_ocean_by_height'] = info['height_y'] < DEEP_OCEAN_Y
+   413→
+   414→    # Humidity
+   415→    info['humidity'] = int(maps['humidity'][pz, px])
+   416→
+   417→    # Temperature RGB → climate zone
+   418→    rgb = maps['temperature'][pz, px]
+   419→    info['temp_rgb'] = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
+   420→    climate, dist = detect_climate(rgb)
+   421→    info['climate'] = climate
+   422→    info['climate_temp'] = CLIMATE_TEMPS[climate]
+   423→    info['climate_dist'] = round(dist, 2)
+   424→
+   425→    # Sea/ocean — v4: МАСКА (alpha>0 = океан)
+   426→    sea_pixel = maps['sea_ocean'][pz, px]
+   427→    info['sea_rgba'] = (int(sea_pixel[0]), int(sea_pixel[1]),
+   428→                         int(sea_pixel[2]), int(sea_pixel[3]))
+   429→    info['is_ocean'] = (sea_pixel[3] > 0) and (sea_pixel[0] < WATER_RED_THRESHOLD)
+   430→    # Deep ocean: ocean AND height Y < DEEP_OCEAN_Y
+   431→    deep_ocean_gray = int(round((DEEP_OCEAN_Y - MIN_OCEAN) * SEA_LEVEL_GRAY / (SEA_LEVEL - MIN_OCEAN)))
+   432→    info['is_deep_ocean'] = info['is_ocean'] and (gray <= deep_ocean_gray)
+   433→
+   434→    # Lakes — alpha-aware (СОВПАДАЕТ с Java)
+   435→    lake_pixel = maps['lakes'][pz, px]
+   436→    info['lake_rgba'] = (int(lake_pixel[0]), int(lake_pixel[1]),
+   437→                         int(lake_pixel[2]), int(lake_pixel[3]))
+   438→    info['is_lake'] = (lake_pixel[3] > 0) and (lake_pixel[0] < WATER_RED_THRESHOLD)
+   439→
+   440→    # Rivers — alpha-aware (СОВПАДАЕТ с Java)
+   441→    river_pixel = maps['rivers'][pz, px]
+   442→    info['river_rgba'] = (int(river_pixel[0]), int(river_pixel[1]),
+   443→                          int(river_pixel[2]), int(river_pixel[3]))
+   444→    info['is_river'] = (river_pixel[3] > 0) and (river_pixel[0] < WATER_RED_THRESHOLD)
+   445→
+   446→    # Erosion
+   447→    info['erosion'] = int(maps['erosion'][pz, px])
+   448→
+   449→    # Biome (determine from biome_map color)
+   450→    biome_color = tuple(int(c) for c in biome_map[pz, px])
+   451→    info['biome_color'] = biome_color
+   452→    info['biome'] = None
+   453→    for name, color in BIOME_COLORS.items():
+   454→        if biome_color == color:
+   455→            info['biome'] = name
+   456→            break
+   457→
+   458→    # Определяем, нужно ли менять температуру из-за высоты (>80)
+   459→    alt_temp = info['climate_temp']
+   460→    if info['height_y'] > 80:
+   461→        alt_temp -= (info['height_y'] - 80) * 0.001
+   462→        alt_temp = max(0.0, alt_temp)
+   463→    info['altitude_temp'] = round(alt_temp, 4)
+   464→
+   465→    return info
+   466→
+   467→
+   468→def print_info(info, worldX, worldZ, px, pz, imgW, imgH):
+   469→    """Вывести подробную информацию о точке."""
+   470→    chunkX = worldX >> 4
+   471→    chunkZ = worldZ >> 4
+   472→    biomeX = worldX >> 2
+   473→    biomeZ = worldZ >> 2
+   474→
+   475→    print()
+   476→    print("=" * 64)
+   477→    print(f"  КООРДИНАТЫ ИГРОКА: ({worldX:+8d}, {worldZ:+8d})")
+   478→    print("=" * 64)
+   479→    print(f"  Пиксель на карте: ({px:5d}, {pz:5d}) / ({imgW}x{imgH})")
+   480→    print(f"  Чанк:              ({chunkX:+7d}, {chunkZ:+7d})")
+   481→    print(f"  Биом-координаты:   ({biomeX:+7d}, {biomeZ:+7d})")
+   482→    print(f"  Масштаб: 1 пиксель = {WORLD_SIZE // imgW} блоков")
+   483→    print("-" * 64)
+   484→
+   485→    # ВЫСОТА
+   486→    print(f"  ВЫСОТА (height.png — v4 кусочно-линейная формула):")
+   487→    print(f"    gray = {info['height_gray']:3d} / 255")
+   488→    print(f"    Y    = {info['height_y']:+4d}  (диапазон {MIN_OCEAN}..{MAX_TERRAIN})")
+   489→    if info.get('is_ocean', False):
+   490→        depth = SEA_LEVEL - info['height_y']
+   491→        deep_flag = " [DEEP OCEAN]" if info.get('is_deep_ocean', False) else ""
+   492→        print(f"    => ОКЕАН (mask): глубина {depth} блоков ({SEA_LEVEL}){deep_flag}")
+   493→    elif info['height_y'] < SEA_LEVEL:
+   494→        print(f"    => НИЗКАЯ СУША: {info['height_y'] - SEA_LEVEL} блоков ниже уровня моря (без маски океана)")
+   495→    else:
+   496→        print(f"    => СУША: {info['height_y'] - SEA_LEVEL} блоков выше уровня моря ({SEA_LEVEL})")
+   497→    print("-" * 64)
+   498→
+   499→    # КЛИМАТ
+   500→    print(f"  КЛИМАТ (temperature.png):")
+   501→    print(f"    RGB         = {info['temp_rgb']}")
+   502→    print(f"    Зона        = {info['climate']}")
+   503→    print(f"    Температура = {info['climate_temp']:.2f}")
+   504→    print(f"    Выс.темп    = {info['altitude_temp']:.4f} (с поправкой на высоту)")
+   505→    print(f"    Евкл. dist  = {info['climate_dist']:.2f}")
+   506→    print("-" * 64)
+   507→
+   508→    # ВЛАЖНОСТЬ
+   509→    hum = info['humidity']
+   510→    hum_label = "ВЛАЖНО" if hum > 128 else "СУХО"
+   511→    print(f"  ВЛАЖНОСТЬ (humidity.png):")
+   512→    print(f"    value = {hum:3d} / 255  →  {hum_label}")
+   513→    if hum < 85:
+   514→        print(f"    Индекс влажности: 0 (очень сухо)")
+   515→    elif hum < 170:
+   516→        print(f"    Индекс влажности: 1 (умеренно)")
+   517→    else:
+   518→        print(f"    Индекс влажности: 2 (очень влажно)")
+   519→    print("-" * 64)
+   520→
+   521→    # ЭРОЗИЯ
+   522→    ero = info['erosion']
+   523→    print(f"  ЭРОЗИЯ (erosion.png):")
+   524→    print(f"    value = {ero:3d} / 255")
+   525→    if ero > 200:
+   526→        print(f"    => Сильно эродировано (ровный ландшафт)")
+   527→    elif ero < 60:
+   528→        print(f"    => Слабо эродировано (горный рельеф)")
+   529→    else:
+   530→        print(f"    => Умеренная эрозия")
+   531→    print("-" * 64)
+   532→
+   533→    # ВОДА
+   534→    print(f"  ВОДА (v4: океан определяется МАСКОЙ map_sea-ocean.png):")
+   535→    water_flags = []
+   536→    if info.get('is_deep_ocean', False):
+   537→        water_flags.append("DEEP_OCEAN (mask)")
+   538→    elif info.get('is_ocean', False):
+   539→        water_flags.append("OCEAN (mask)")
+   540→    if info.get('is_lake', False):
+   541→        water_flags.append("LAKE")
+   542→    if info.get('is_river', False):
+   543→        water_flags.append("RIVER")
+   544→
+   545→    if water_flags:
+   546→        print(f"    *** В ВОДЕ: {' + '.join(water_flags)} ***")
+   547→    else:
+   548→        print(f"    СУША (воды нет)")
+   549→
+   550→    if 'sea_rgba' in info:
+   551→        print(f"    sea_ocean RGBA = {info['sea_rgba']}"
+   552→              f"  → {'OCEAN' if info.get('is_ocean', False) else 'land'}")
+   553→    if 'lake_rgba' in info:
+   554→        print(f"    lakes RGBA  = {info['lake_rgba']}"
+   555→              f"  → {'WATER' if info.get('is_lake', False) else 'no water'}")
+   556→    if 'river_rgba' in info:
+   557→        print(f"    rivers RGBA = {info['river_rgba']}"
+   558→              f"  → {'WATER' if info.get('is_river', False) else 'no water'}")
+   559→
+   560→    # Normalized parameters (for reference)
+   561→    if 'climate_temp' in info:
+   562→        t_norm = (info['climate_temp'] - 0.5) * 2.0
+   563→        print(f"    [параметры] T={t_norm:+.2f}")
+   564→    if 'humidity' in info:
+   565→        h_norm = (info['humidity'] / 255.0) * 2.0 - 1.0
+   566→        print(f"    [параметры] H={h_norm:+.2f}")
+   567→    if 'erosion' in info:
+   568→        e_norm = (info['erosion'] / 255.0) * 2.0 - 1.0
+   569→        print(f"    [параметры] E={e_norm:+.2f}")
+   570→    print("-" * 64)
+   571→
+   572→    # БИОМ
+   573→    print(f"  ПРЕДПОЛАГАЕМЫЙ БИОМ:")
+   574→    print(f"    Название = {info['biome'] or 'UNKNOWN'}")
+   575→    print(f"    RGB      = {info['biome_color']}")
+   576→    print("=" * 64)
+   577→    print()
+   578→
+   579→
+   580→def save_region(original_img, x, z, half_size):
+   581→    """Сохранить область для последующего восстановления."""
+   582→    key = (x, z)
+   583→    if key not in saved_regions:
+   584→        x1 = max(0, x - half_size)
+   585→        z1 = max(0, z - half_size)
+   586→        x2 = min(original_img.width, x + half_size + 1)
+   587→        z2 = min(original_img.height, z + half_size + 1)
+   588→        saved_regions[key] = original_img.crop((x1, z1, x2, z2))
+   589→
+   590→
+   591→def restore_region(canvas, original_img, x, z, half_size):
+   592→    """Восстановить область (затереть старый маркер)."""
+   593→    key = (x, z)
+   594→    if key in saved_regions:
+   595→        region = saved_regions[key]
+   596→        x1 = max(0, x - half_size)
+   597→        z1 = max(0, z - half_size)
+   598→        canvas.paste(region, (x1, z1))
+   599→        del saved_regions[key]
+   600→
+   601→
+   602→def draw_marker(draw, px, pz):
+   603→    """Нарисовать маркер (крест + круг + буква P)."""
+   604→    s = MARKER_SIZE
+   605→    cs = CROSSHAIR_SIZE
+   606→
+   607→    # Crosshair
+   608→    draw.line([(px - cs, pz), (px + cs, pz)], fill=MARKER_COLOR_OUTER, width=2)
+   609→    draw.line([(px, pz - cs), (px, pz + cs)], fill=MARKER_COLOR_OUTER, width=2)
+   610→
+   611→    # Внешний круг
+   612→    draw.ellipse([(px - s, pz - s), (px + s, pz + s)],
+   613→                 outline=MARKER_COLOR_OUTER, width=2)
+   614→
+   615→    # Центральная точка
+   616→    draw.ellipse([(px - 3, pz - 3), (px + 3, pz + 3)],
+   617→                 fill=MARKER_COLOR_INNER, outline=MARKER_COLOR_OUTER, width=1)
+   618→
+   619→    # Буква P (Player)
+   620→    try:
+   621→        font = ImageFont.truetype("arial.ttf", 16)
+   622→    except (OSError, IOError):
+   623→        try:
+   624→            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
+   625→        except (OSError, IOError):
+   626→            font = ImageFont.load_default()
+   627→
+   628→    text = MARKER_TEXT
+   629→    bbox = draw.textbbox((px, pz), text, font=font)
+   630→    tw = bbox[2] - bbox[0]
+   631→    th = bbox[3] - bbox[1]
+   632→    draw.text((px - tw // 2, pz - s - th - 4), text, fill=MARKER_COLOR_OUTER, font=font)
+   633→
+   634→
+   635→# Глобальное состояние
+   636→saved_regions = {}
+   637→
+   638→
+   639→def main():
+   640→    parser = argparse.ArgumentParser(
+   641→        description="Локатор игрока на карте биомов (авто-генерация из 7 PNG)"
+   642→    )
+   643→    parser.add_argument("--maps-dir", default=None,
+   644→                        help="Папка с PNG картами (по умолчанию авто-поиск)")
+   645→    parser.add_argument("--output", default="map_located.png",
+   646→                        help="Файл вывода карты с маркером")
+   647→    parser.add_argument("--regenerate", action="store_true",
+   648→                        help="Перегенерировать карту биомов даже если есть biome_map.png")
+   649→    parser.add_argument("--biome-map", default="biome_map.png",
+   650→                        help="Файл для сохранения карты биомов")
+   651→    parser.add_argument("--no-marker", action="store_true",
+   652→                        help="Не рисовать маркер, только вывести информацию")
+   653→    args = parser.parse_args()
+   654→
+   655→    print("=" * 64)
+   656→    print("  MAP LOCATOR v2.0 — генерация карты биомов из 7 PNG")
+   657→    print("  Имена файлов СОВПАДАЮТ с Java-модом:")
+   658→    for k, v in DEFAULT_MAP_FILES.items():
+   659→        print(f"    {k:12s} → {v}")
+   660→    print("=" * 64)
+   661→
+   662→    # Найти папку с картами
+   663→    maps_dir = find_maps_dir(args.maps_dir)
+   664→    if not maps_dir:
+   665→        print(f"\n[!] Карты не найдены. Укажите папку через --maps-dir")
+   666→        print(f"    Ищет: {list(DEFAULT_MAP_FILES.values())}")
+   667→        print(f"    Стандартные пути:")
+   668→        if sys.platform == "win32":
+   669→            appdata = os.environ.get("APPDATA", "")
+   670→            print(f"      {appdata}\\.tlauncher\\minecraft")
+   671→            print(f"      {appdata}\\.minecraft")
+   672→        print(f"      . (текущая директория)")
+   673→        sys.exit(1)
+   674→    print(f"\n[*] Карты найдены в: {os.path.abspath(maps_dir)}")
+   675→
+   676→    # Загрузить карты
+   677→    maps = load_maps(maps_dir)
+   678→    if maps is None:
+   679→        print("[!] Не удалось загрузить карты")
+   680→        sys.exit(1)
+   681→
+   682→    # Сгенерировать или загрузить карту биомов
+   683→    biome_map_path = os.path.join(os.path.dirname(os.path.abspath(args.biome_map)) or '.',
+   684→                                  os.path.basename(args.biome_map))
+   685→    if args.regenerate or not os.path.exists(biome_map_path):
+   686→        biome_map_np = generate_biome_map(maps)
+   687→        Image.fromarray(biome_map_np).save(biome_map_path)
+   688→        print(f"[*] Карта биомов сохранена: {biome_map_path}")
+   689→        # Также сохраняем легенду
+   690→        legend = Image.new('RGB', (280, 500), (255, 255, 255))
+   691→        draw = ImageDraw.Draw(legend)
+   692→        try:
+   693→            font = ImageFont.truetype("arial.ttf", 12)
+   694→        except (OSError, IOError):
+   695→            try:
+   696→                font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 12)
+   697→            except (OSError, IOError):
+   698→                font = ImageFont.load_default()
+   699→        y_off = 10
+   700→        draw.text((10, y_off), "LEGENDA BIOME MAP", fill='black', font=font)
+   701→        y_off += 25
+   702→        for name, color in BIOME_COLORS.items():
+   703→            draw.rectangle([10, y_off, 30, y_off + 20], fill=color, outline='black')
+   704→            draw.text((40, y_off + 2), name.replace('_', ' ').title(),
+   705→                      fill='black', font=font)
+   706→            y_off += 25
+   707→        legend_path = os.path.join(os.path.dirname(biome_map_path) or '.',
+   708→                                   'biome_legend.png')
+   709→        legend.save(legend_path)
+   710→        print(f"[*] Легенда сохранена: {legend_path}")
+   711→    else:
+   712→        print(f"[*] Используется существующая карта биомов: {biome_map_path}")
+   713→        biome_map_np = np.array(Image.open(biome_map_path).convert('RGB'))
+   714→
+   715→    imgW, imgH = biome_map_np.shape[1], biome_map_np.shape[0]
+   716→    print(f"\n[*] Размер карты: {imgW} x {imgH} пикселей")
+   717→    print(f"[*] Масштаб: 1 пиксель = {WORLD_SIZE // imgW} блоков")
+   718→    print(f"[*] Границы мира: X/Z от {-HALF_WORLD} до {HALF_WORLD}")
+   719→    print()
+   720→    print("Введите координаты (X Z) или 'q' для выхода:")
+   721→    print("  Пример: 50000 -30000")
+   722→    print("  Пример: -15000 -6000")
+   723→    print()
+   724→
+   725→    # Открываем оригинал карты биомов (для последующего затирания маркеров)
+   726→    original_biome_img = Image.fromarray(biome_map_np.copy()).convert("RGBA")
+   727→
+   728→    current_marker = None
+   729→
+   730→    while True:
+   731→        try:
+   732→            user_input = input("> ").strip()
+   733→        except (EOFError, KeyboardInterrupt):
+   734→            print("\nВыход.")
+   735→            break
+   736→
+   737→        if user_input.lower() in ("q", "quit", "exit", "выход"):
+   738→            print("Выход.")
+   739→            break
+   740→
+   741→        if not user_input:
+   742→            continue
+   743→
+   744→        # Парсим координаты
+   745→        parts = user_input.replace(",", " ").split()
+   746→        if len(parts) < 2:
+   747→            print("[!] Введите ДВА числа: X и Z. Пример: 50000 -30000")
+   748→            continue
+   749→
+   750→        try:
+   751→            worldX = int(parts[0])
+   752→            worldZ = int(parts[1])
+   753→        except ValueError:
+   754→            print("[!] Неверный формат. Пример: 50000 -30000")
+   755→            continue
+   756→
+   757→        # Проверяем границы
+   758→        out_of_bounds = False
+   759→        if abs(worldX) > HALF_WORLD or abs(worldZ) > HALF_WORLD:
+   760→            print(f"[!] Координаты ({worldX}, {worldZ}) вне границ мира (±{HALF_WORLD})")
+   761→            out_of_bounds = True
+   762→            worldX = max(-HALF_WORLD, min(HALF_WORLD, worldX))
+   763→            worldZ = max(-HALF_WORLD, min(HALF_WORLD, worldZ))
+   764→
+   765→        # Переводим в пиксели
+   766→        px, pz = world_to_pixel(worldX, worldZ, imgW, imgH)
+   767→
+   768→        # Получаем подробную информацию
+   769→        info = get_pixel_info(maps, biome_map_np, px, pz)
+   770→        print_info(info, worldX, worldZ, px, pz, imgW, imgH)
+   771→
+   772→        if out_of_bounds:
+   773→            print("[!] Информация показана для ближайшей точки внутри границ мира.")
+   774→
+   775→        if args.no_marker:
+   776→            continue
+   777→
+   778→        # Работаем с копией оригинала
+   779→        canvas = original_biome_img.copy()
+   780→
+   781→        # Если был старый маркер — восстанавливаем область под ним
+   782→        if current_marker is not None:
+   783→            old_px, old_pz = current_marker
+   784→            restore_region(canvas, original_biome_img, old_px, old_pz,
+   785→                           CROSSHAIR_SIZE + MARKER_SIZE + 20)
+   786→
+   787→        # Сохраняем область под новым маркером
+   788→        save_region(original_biome_img, px, pz,
+   789→                    CROSSHAIR_SIZE + MARKER_SIZE + 20)
+   790→
+   791→        # Рисуем новый маркер
+   792→        draw = ImageDraw.Draw(canvas)
+   793→        draw_marker(draw, px, pz)
+   794→
+   795→        # Сохраняем результат
+   796→        output_path = args.output
+   797→        canvas.save(output_path, "PNG")
+   798→        print(f"    -> Маркер нарисован: {output_path}")
+   799→        print()
+   800→
+   801→        current_marker = (px, pz)
+   802→
+   803→    # Открываем изображение в системе (только Windows)
+   804→    if current_marker and not args.no_marker and sys.platform == "win32":
+   805→        try:
+   806→            os.startfile(args.output)
+   807→        except Exception:
+   808→            pass
+   809→
+   810→    print("Готово.")
+   811→
+   812→
+   813→if __name__ == "__main__":
+   814→    main()
+   815→
