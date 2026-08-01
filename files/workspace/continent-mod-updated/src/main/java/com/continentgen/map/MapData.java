@@ -11,13 +11,14 @@ import java.util.logging.Logger;
 /**
  * Хранит 7 массивов PNG карт для генерации мира.
  *
- * v5 (28.07.2026):
+ * v7 (01.08.2026):
  *   - Высота: билинейная интерполяция (гладкая поверхность без ступеней).
  *   - Океан: маска через getOceanNess() [0..1] — плавный берег.
  *   - Реки/Озёра: getRiverNess()/getLakeNess() [0..1] — билинейная
  *     интерполяция бинарной маски. НЕ использует круги.
- *   - Уровень воды рек/озёр = SEA_LEVEL (не terrainHeight).
- *     Решает проблему "горы покрытые 1 блоком воды".
+ *   - Вода рек/озёр: terrain carving (реализуется в ContinentChunkGenerator).
+ *     Озёра: ПЛОСКИЙ уровень воды (SEA_LEVEL + 3). Реки: русло в рельефе.
+ *     БЕЗ отдельных зон берега (решает баг «двойной берег»).
  */
 public class MapData {
     private static final Logger LOGGER = Logger.getLogger("ContinentGen");
@@ -35,6 +36,9 @@ public class MapData {
     public static final int WATER_RED_THRESHOLD = 128;  // red < 128 AND alpha > 0 = вода
 
     // ─── Пороги "riverNess" / "lakeNess" ──────────────────────────
+    // Примечание v7: пороги bank_threshold больше НЕ используются
+    // в ContinentChunkGenerator (зоны берега удалены).
+    // Оставлены для совместимости с BiomeSource и внешними вызовами.
     public static final double RIVER_CHANNEL_THRESHOLD = 0.5;
     public static final double RIVER_BANK_THRESHOLD = 0.2;
     public static final double LAKE_CHANNEL_THRESHOLD = 0.5;
